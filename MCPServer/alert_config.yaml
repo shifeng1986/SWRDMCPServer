@@ -1,0 +1,92 @@
+# MCPServer 告警配置文件样例
+
+# 是否使能告警（全局开关）
+enabled: true
+
+# 触发告警的最低风险等级（low / medium / high / critical）
+minimum_level: high
+
+# 告警通知渠道（可同时启用多个）
+# 每个渠道的 enabled 为 true 时才会启用
+channels:
+  # 邮件通知
+  email:
+    enabled: false
+    # SMTP 服务器配置
+    smtp_host: smtp.example.com
+    smtp_port: 465
+    smtp_ssl: true
+    smtp_username: alert@example.com
+    smtp_password: your_password
+    # 发件人地址
+    from_addr: alert@example.com
+    # 收件人地址（支持多个）
+    to_addrs:
+      - admin@example.com
+      - ops@example.com
+    # 邮件主题模板（可用变量：{risk_level}, {operation}, {timestamp}）
+    subject_template: "[MCPServer 告警] {risk_level} - {operation}"
+    # 邮件正文模板
+    body_template: |
+      MCPServer 安全告警通知
+      ============================
+      风险等级: {risk_level}
+      操作: {operation}
+      原因: {reason}
+      用户: {user}
+      请求ID: {request_id}
+      时间: {timestamp}
+
+  # 钉钉机器人通知
+  dingtalk:
+    enabled: false
+    # 钉钉机器人 Webhook 地址
+    webhook_url: https://oapi.dingtalk.com/robot/send?access_token=your_token
+    # 安全设置（可选：sign / keyword / ip）
+    security_type: sign
+    # 签名密钥（security_type 为 sign 时必填）
+    secret: your_secret
+    # 消息模板
+    message_template: |
+      **MCPServer 安全告警**
+      > 风险等级: {risk_level}
+      > 操作: {operation}
+      > 原因: {reason}
+      > 用户: {user}
+      > 时间: {timestamp}
+
+  # 企业微信机器人通知
+  wecom:
+    enabled: false
+    # 企业微信机器人 Webhook 地址
+    webhook_url: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=your_key
+    # 消息模板
+    message_template: |
+      **MCPServer 安全告警**
+      > 风险等级: {risk_level}
+      > 操作: {operation}
+      > 原因: {reason}
+      > 用户: {user}
+      > 时间: {timestamp}
+
+  # 自定义 Webhook 通知
+  webhook:
+    enabled: false
+    # Webhook 回调地址
+    url: https://your-server.com/api/alert
+    # 请求方法
+    method: POST
+    # 自定义请求头
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer your_token
+    # 请求体模板（JSON 格式）
+    body_template: |
+      {
+        "risk_level": "{risk_level}",
+        "operation": "{operation}",
+        "reason": "{reason}",
+        "user": "{user}",
+        "request_id": "{request_id}",
+        "timestamp": "{timestamp}"
+      }

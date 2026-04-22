@@ -1,0 +1,30 @@
+# MCPServer 安全配置文件
+
+# 是否使能高危检查（全局开关）
+enabled: true
+
+# 确认有效期（秒），高危操作确认后在此时间内无需再次确认
+confirm_expire_seconds: 300
+
+# 操作风险等级映射：将 Redfish HTTP 方法映射为风险等级
+# 可选等级：low / medium / high / critical
+risk_level_mapping:
+  GET: low
+  POST: high
+  PATCH: high
+  PUT: high
+  DELETE: critical
+  # 未匹配的方法默认等级
+  default: medium
+
+# 各风险等级的处理策略
+# 可选策略：
+#   block   - 直接拦截，抛出 SecurityCheckError
+#   confirm - 需要确认，抛出 ConfirmationRequired
+#   log     - 仅记录日志，允许执行
+#   allow   - 直接允许，不记录日志
+actions:
+  critical: block
+  high: confirm
+  medium: log
+  low: log

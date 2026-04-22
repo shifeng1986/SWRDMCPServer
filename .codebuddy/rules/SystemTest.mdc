@@ -1,0 +1,13 @@
+---
+description: 
+alwaysApply: false
+enabled: true
+updatedAt: 2026-04-22T09:21:54.836Z
+provider: 
+---
+
+测试PC IP：10。41.6.114
+测试设备IP：192.168.88.222
+测试设备用户名：admin
+测试设备密码：h3c@1234
+测试设备串口交换机端口：192.168.20.199.3011
