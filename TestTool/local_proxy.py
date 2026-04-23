@@ -15,331 +15,292 @@ Local Proxy 代理转发工具
 
 import http.server
 import json
-import os
-import subprocess
+import threading
+import time
+from typing import Any
 
-import requests
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
 
+_thread_local = threading.local()
+_SESSIONS: dict[str, dict[str, Any]] = {}
+_SESSIONS_LOCK = threading.Lock()
 
-# ──────────────────────────────────────────────
-# 配置
-# ──────────────────────────────────────────────
+def _get_playwright():
+    if sync_playwright is None:
+        raise RuntimeError("未安装 playwright")
+    if not hasattr(_thread_local, 'pw') or _thread_local.pw is None:
+        _thread_local.pw = sync_playwright().start()
+    return _thread_local.pw
 
-PROXY_HOST = "0.0.0.0"
-PROXY_PORT = 8888
-REQUEST_TIMEOUT = 30
+def _browser_open(session_id: str, headless: bool = True, browser: str = "chromium"):
+    pw = _get_playwright()
+    
+    with _SESSIONS_LOCK:
+        if session_id in _SESSIONS:
+            return {"ok": True, "message": f"session 已存在: {session_id}"}
 
-# ipmitool 可执行文件路径：优先从脚本同级目录查找
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_IPMITOOL_PATH = os.path.join(_SCRIPT_DIR, "ipmitool.exe")
-if not os.path.isfile(_IPMITOOL_PATH):
-    # 同级目录没有，回退到系统 PATH 中的 ipmitool
-    _IPMITOOL_PATH = "ipmitool"
+        b = getattr(pw, browser).launch(headless=headless)
+        ctx = b.new_context(ignore_https_errors=True)
+        page = ctx.new_page()
+        _SESSIONS[session_id] = {
+            "browser": b, 
+            "context": ctx, 
+            "page": page, 
+            "ts": time.time(),
+            "thread_id": threading.current_thread().ident
+        }
+        return {"ok": True, "sessionId": session_id}
 
+def _get_page(session_id: str):
+    with _SESSIONS_LOCK:
+        s = _SESSIONS.get(session_id)
+        if not s:
+            raise RuntimeError(f"session 不存在: {session_id}")
+        if s.get("thread_id") != threading.current_thread().ident:
+            raise RuntimeError(f"session {session_id} 只能在创建它的线程中访问")
+        s["ts"] = time.time()
+        return s["page"]
 
-# ──────────────────────────────────────────────
-# 日志工具
-# ──────────────────────────────────────────────
-
-def _log(level: str, msg: str):
-    """简单日志输出"""
-    print(f"[{level}] {msg}")
-
-
-def log_info(msg: str):
-    _log("INFO", msg)
-
-
-def log_warn(msg: str):
-    _log("WARN", msg)
-
-
-def log_error(msg: str):
-    _log("ERROR", msg)
-
-
-# ──────────────────────────────────────────────
-# Redfish 请求转发核心逻辑
-# ──────────────────────────────────────────────
-
-def forward_redfish_request(
-    method: str,
-    device_ip: str,
-    url: str,
-    auth: tuple,
-    body: str,
-) -> requests.Response:
+def _run_actions(session_id: str, actions: list, options: dict | None = None):
     """
-    将请求转发到目标设备
-
-    Args:
-        method: HTTP 方法
-        device_ip: 目标设备 IP
-        url: Redfish 路径（如 /redfish/v1）
-        auth: Basic 认证元组 (username, password)
-        body: 请求体字符串
-
-    Returns:
-        requests.Response: 设备的响应
+    支持的操作类型（无需截图）：
+    - goto: 导航到URL
+    - click: 点击元素
+    - fill: 填写输入框
+    - press: 按键
+    - wait_for_selector: 等待元素出现
+    - wait_for_load_state: 等待页面加载状态
+    - get_text: 获取元素文本内容
+    - get_html: 获取元素HTML
+    - eval: 执行JavaScript并返回结果
+    - get_all_links: 获取所有链接
+    - get_all_inputs: 获取所有输入框
+    - get_page_info: 获取页面基本信息
     """
-    target_url = f"https://{device_ip}{url}"
-    kwargs = {
-        "url": target_url,
-        "method": method,
-        "auth": auth,
-        "verify": False,
-        "timeout": REQUEST_TIMEOUT,
-        "allow_redirects": True,
-    }
-
-    if method.upper() in ("POST", "PATCH", "PUT") and body:
+    page = _get_page(session_id)
+    results = []
+    
+    for i, a in enumerate(actions):
+        t = (a.get("type") or "").lower()
+        timeout = a.get("timeout", 30000)
         try:
-            kwargs["json"] = json.loads(body)
-        except json.JSONDecodeError:
-            kwargs["data"] = body
+            if t == "goto":
+                page.goto(a["url"], wait_until=a.get("waitUntil", "domcontentloaded"), timeout=timeout)
+                results.append({"i": i, "ok": True, "url": page.url})
+                
+            elif t == "click":
+                page.click(a["selector"], timeout=timeout)
+                results.append({"i": i, "ok": True})
+                
+            elif t == "fill":
+                page.fill(a["selector"], a.get("text", ""), timeout=timeout)
+                results.append({"i": i, "ok": True})
+                
+            elif t == "press":
+                page.press(a["selector"], a["key"], timeout=timeout)
+                results.append({"i": i, "ok": True})
+                
+            elif t == "wait_for_selector":
+                page.wait_for_selector(a["selector"], timeout=timeout)
+                results.append({"i": i, "ok": True})
+                
+            elif t == "wait_for_load_state":
+                page.wait_for_load_state(a.get("state", "load"), timeout=timeout)
+                results.append({"i": i, "ok": True})
+                
+            elif t == "get_text":
+                # 获取元素文本内容（替代截图）
+                text = page.text_content(a["selector"], timeout=timeout)
+                results.append({"i": i, "ok": True, "text": text})
+                
+            elif t == "get_html":
+                # 获取元素HTML
+                html = page.inner_html(a["selector"], timeout=timeout)
+                results.append({"i": i, "ok": True, "html": html})
+                
+            elif t == "get_attribute":
+                # 获取元素属性
+                attr = page.get_attribute(a["selector"], a["attribute"], timeout=timeout)
+                results.append({"i": i, "ok": True, "attribute": attr})
+                
+            elif t == "eval":
+                # 执行JavaScript并返回结果
+                result = page.evaluate(a["expression"], a.get("arg"))
+                results.append({"i": i, "ok": True, "result": result})
+                
+            elif t == "get_all_links":
+                # 获取所有链接（替代截图查看页面结构）
+                links = page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('a')).map(a => ({
+                        text: a.textContent.trim(),
+                        href: a.href,
+                        id: a.id,
+                        class: a.className
+                    })).filter(l => l.text.length > 0);
+                }""")
+                results.append({"i": i, "ok": True, "links": links})
+                
+            elif t == "get_all_inputs":
+                # 获取所有输入框
+                inputs = page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('input,textarea,select')).map(e => ({
+                        tag: e.tagName,
+                        type: e.type,
+                        name: e.name,
+                        id: e.id,
+                        placeholder: e.placeholder,
+                        class: e.className
+                    }));
+                }""")
+                results.append({"i": i, "ok": True, "inputs": inputs})
+                
+            elif t == "get_all_buttons":
+                # 获取所有按钮
+                buttons = page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('button,[role=button]')).map(e => ({
+                        text: e.textContent.trim(),
+                        id: e.id,
+                        class: e.className,
+                        type: e.type
+                    })).filter(b => b.text.length > 0);
+                }""")
+                results.append({"i": i, "ok": True, "buttons": buttons})
+                
+            elif t == "get_page_info":
+                # 获取页面基本信息（标题、URL、所有文本内容）
+                info = page.evaluate("""() => ({
+                    title: document.title,
+                    url: window.location.href,
+                    text: document.body.innerText.slice(0, 2000),
+                    meta: Array.from(document.querySelectorAll('meta')).map(m => ({
+                        name: m.name,
+                        content: m.content
+                    })).filter(m => m.name)
+                })""")
+                results.append({"i": i, "ok": True, "info": info})
+                
+            elif t == "query_selector_all":
+                # 查询多个元素并返回信息
+                elements = page.evaluate("""(selector) => {
+                    return Array.from(document.querySelectorAll(selector)).map((e, i) => ({
+                        index: i,
+                        tag: e.tagName,
+                        text: e.textContent.trim().slice(0, 100),
+                        id: e.id,
+                        class: e.className
+                    }));
+                }""", a["selector"])
+                results.append({"i": i, "ok": True, "elements": elements})
+                
+            else:
+                results.append({"i": i, "ok": False, "error": f"不支持的 action.type: {t}"})
+                
+        except Exception as e:
+            results.append({"i": i, "ok": False, "error": str(e)})
+    
+    return {"ok": True, "results": results}
 
-    return requests.request(**kwargs)
-
-
-def forward_ipmi_request(
-    device_ip: str,
-    auth: tuple,
-    command: str,
-) -> dict:
-    """
-    通过 ipmitool 执行 IPMI 命令
-
-    Args:
-        device_ip: 目标设备 IP
-        auth: 认证元组 (username, password)
-        command: ipmitool 命令（如 "mc info", "sensor list"）
-
-    Returns:
-        dict: 执行结果，包含 returncode, stdout, stderr
-    """
-    username, password = auth
-    # 构建 ipmitool 命令
-    ipmi_cmd = [
-        _IPMITOOL_PATH,
-        "-I", "lanplus",
-        "-H", device_ip,
-        "-U", username,
-        "-P", password,
-    ]
-    # 将用户输入的命令拆分追加
-    ipmi_cmd.extend(command.split())
-
-    log_info(f"执行 IPMI 命令: {' '.join(ipmi_cmd[:6])} *** {command}")
-
-    try:
-        result = subprocess.run(
-            ipmi_cmd,
-            capture_output=True,
-            text=True,
-            timeout=REQUEST_TIMEOUT,
-        )
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"IPMI 命令执行超时（{REQUEST_TIMEOUT}s）",
-        }
-    except FileNotFoundError:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "ipmitool 未安装或不在 PATH 中",
-        }
-    except Exception as e:
-        return {
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"IPMI 命令执行异常: {e}",
-        }
-
-
-# ──────────────────────────────────────────────
-# HTTP 代理服务器 Handler
-# ──────────────────────────────────────────────
 
 class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
-    """处理 MCP Server 转发过来的 Redfish/IPMI 请求"""
-
     def do_POST(self):
-        """处理 POST 请求，支持 /redfish 和 /ipmi 路径"""
-        if self.path == "/redfish":
-            self._handle_redfish()
-        elif self.path == "/ipmi":
-            self._handle_ipmi()
+        if self.path == "/browser/open":
+            self._handle_browser_open()
+        elif self.path == "/browser/run":
+            self._handle_browser_run()
+        elif self.path == "/browser/close":
+            self._handle_browser_close()
         else:
             self._send_error_response(404, f"路径不存在: {self.path}")
 
-    def _read_payload(self) -> dict:
-        """读取并解析请求体 JSON"""
+    def _read_payload(self):
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length == 0:
             return None
-        body = self.rfile.read(content_length)
-        return json.loads(body.decode("utf-8"))
-
-    def _handle_redfish(self):
-        """处理 /redfish 请求"""
-        try:
-            payload = self._read_payload()
-        except Exception as e:
-            self._send_error_response(400, f"请求体解析失败: {e}")
-            return
-
-        if not payload:
-            self._send_error_response(400, "请求体为空")
-            return
-
-        # 提取请求参数
-        device_ip = payload.get("deviceIP", "")
-        device_user = payload.get("deviceUser", "")
-        device_pwd = payload.get("devicePwd", "")
-        method = payload.get("method", "GET").upper()
-        url = payload.get("url", "")
-        request_body = payload.get("body", "")
-
-        # ── 打印请求信息 ──
-        log_info("=" * 60)
-        log_info(f"收到 Redfish 请求: {method} https://{device_ip}{url}")
-        log_info(f"认证信息: {device_user}:***")
-        if request_body:
-            log_info(f"请求体: {request_body}")
-        else:
-            log_info("请求体: (无)")
-        log_info("=" * 60)
-
-        # ── 转发请求到设备 ──
-        try:
-            response = forward_redfish_request(
-                method=method,
-                device_ip=device_ip,
-                url=url,
-                auth=(device_user, device_pwd),
-                body=request_body,
-            )
-
-            # ── 打印响应信息 ──
-            log_info("=" * 60)
-            log_info(f"设备响应: HTTP {response.status_code}")
-            log_info(f"响应头: {json.dumps(dict(response.headers), ensure_ascii=False, indent=2)}")
-            log_info(f"响应体: {response.text}")
-            log_info("=" * 60)
-
-            # ── 将响应返回给 MCP Server ──
-            result = {
-                "status_code": response.status_code,
-                "headers": dict(response.headers),
-                "body": response.text,
-            }
-            result_json = json.dumps(result, ensure_ascii=False, indent=2)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(result_json.encode("utf-8"))
-
-        except requests.exceptions.RequestException as e:
-            log_error(f"请求转发失败: {e}")
-            self._send_error_response(502, f"请求转发失败: {e}")
-        except Exception as e:
-            log_error(f"请求处理异常: {e}")
-            self._send_error_response(500, f"请求处理异常: {e}")
-
-    def _handle_ipmi(self):
-        """处理 /ipmi 请求"""
-        try:
-            payload = self._read_payload()
-        except Exception as e:
-            self._send_error_response(400, f"请求体解析失败: {e}")
-            return
-
-        if not payload:
-            self._send_error_response(400, "请求体为空")
-            return
-
-        # 提取请求参数
-        device_ip = payload.get("deviceIP", "")
-        device_user = payload.get("deviceUser", "")
-        device_pwd = payload.get("devicePwd", "")
-        command = payload.get("command", "")
-
-        # ── 打印请求信息 ──
-        log_info("=" * 60)
-        log_info(f"收到 IPMI 请求: ipmitool -H {device_ip} -U {device_user} {command}")
-        log_info(f"认证信息: {device_user}:***")
-        log_info("=" * 60)
-
-        # ── 执行 IPMI 命令 ──
-        try:
-            result = forward_ipmi_request(
-                device_ip=device_ip,
-                auth=(device_user, device_pwd),
-                command=command,
-            )
-
-            # ── 打印执行结果 ──
-            log_info("=" * 60)
-            log_info(f"IPMI 执行结果: returncode={result['returncode']}")
-            if result["stdout"]:
-                log_info(f"stdout: {result['stdout']}")
-            if result["stderr"]:
-                log_info(f"stderr: {result['stderr']}")
-            log_info("=" * 60)
-
-            # ── 将结果返回给 MCP Server ──
-            result_json = json.dumps(result, ensure_ascii=False, indent=2)
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(result_json.encode("utf-8"))
-
-        except Exception as e:
-            log_error(f"IPMI 命令处理异常: {e}")
-            self._send_error_response(500, f"IPMI 命令处理异常: {e}")
+        return json.loads(self.rfile.read(content_length).decode("utf-8"))
 
     def _send_error_response(self, code: int, message: str):
-        """发送错误响应"""
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        error_body = json.dumps({"error": message}, ensure_ascii=False, indent=2)
-        self.wfile.write(error_body.encode("utf-8"))
+        self.wfile.write(json.dumps({"error": message}, ensure_ascii=False).encode())
+
+    def _send_json(self, code: int, obj: dict):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(obj, ensure_ascii=False).encode())
 
     def log_message(self, format, *args):
-        """覆盖默认日志格式"""
-        log_info(f"{self.client_address[0]}:{self.client_address[1]} - {format % args}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.client_address[0]} - {format % args}")
+
+    def _handle_browser_open(self):
+        try:
+            payload = self._read_payload() or {}
+            result = _browser_open(
+                session_id=payload.get("sessionId", ""),
+                headless=bool(payload.get("headless", True))
+            )
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"browser open 失败: {e}")
+
+    def _handle_browser_run(self):
+        try:
+            payload = self._read_payload() or {}
+            result = _run_actions(
+                session_id=payload.get("sessionId", ""),
+                actions=payload.get("actions", []),
+                options=payload.get("options", {})
+            )
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"browser run 失败: {e}")
+
+    def _handle_browser_close(self):
+        try:
+            payload = self._read_payload() or {}
+            session_id = payload.get("sessionId", "")
+            with _SESSIONS_LOCK:
+                s = _SESSIONS.get(session_id)
+                if s:
+                    try:
+                        s["context"].close()
+                        s["browser"].close()
+                    except Exception:
+                        pass
+                    _SESSIONS.pop(session_id, None)
+            self._send_json(200, {"ok": True, "sessionId": session_id})
+        except Exception as e:
+            self._send_error_response(500, f"browser close 失败: {e}")
 
 
-# ──────────────────────────────────────────────
-# 服务器启动
-# ──────────────────────────────────────────────
-
-def run_proxy_server(host: str = PROXY_HOST, port: int = PROXY_PORT):
-    """启动 Local Proxy 代理服务器"""
+def run_proxy_server(host="0.0.0.0", port=8888):
     server_address = (host, port)
     httpd = http.server.HTTPServer(server_address, LocalProxyHandler)
-
-    log_info(f"Local Proxy 代理服务器启动: http://{host}:{port}")
-    log_info("等待 MCP Server 转发 Redfish/IPMI 请求...")
-    log_info("按 Ctrl+C 停止服务器")
-
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        log_info("收到停止信号，正在关闭服务器...")
-        httpd.shutdown()
-        httpd.server_close()
-        log_info("服务器已关闭")
+    
+    print(f"Local Proxy 启动: http://{host}:{port}")
+    print("模式: 单线程，支持非截图操作")
+    print("\n支持的操作类型:")
+    print("  - goto: 导航到URL")
+    print("  - click: 点击元素")
+    print("  - fill: 填写输入框")
+    print("  - press: 按键")
+    print("  - wait_for_selector: 等待元素")
+    print("  - wait_for_load_state: 等待页面加载")
+    print("  - get_text: 获取元素文本")
+    print("  - get_html: 获取元素HTML")
+    print("  - get_attribute: 获取元素属性")
+    print("  - eval: 执行JavaScript")
+    print("  - get_all_links: 获取所有链接")
+    print("  - get_all_inputs: 获取所有输入框")
+    print("  - get_all_buttons: 获取所有按钮")
+    print("  - get_page_info: 获取页面信息")
+    print("  - query_selector_all: 查询多个元素")
+    
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

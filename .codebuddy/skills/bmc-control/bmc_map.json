@@ -1,0 +1,152 @@
+{
+  "bmc_info": {
+    "brand": "H3C",
+    "chip": "E2000S",
+    "firmware_version": "3.05",
+    "bios_version": "7.50.28",
+    "device_ip": "192.168.49.71",
+    "base_url": "https://192.168.49.71"
+  },
+  "main_menu": [
+    {"text": "首页", "url": "/dashboard", "status": "active"},
+    {"text": "系统管理", "url": "/system", "status": "active"},
+    {"text": "BMC设置", "url": "/bmc_setting", "status": "active"},
+    {"text": "远程服务", "url": "/remote_service", "status": "active"},
+    {"text": "运维诊断", "url": "/remote_maintenance", "status": "active"},
+    {"text": "固件&软件", "url": "/firmware", "status": "active"},
+    {"text": "用户&安全", "url": "/security", "status": "active"},
+    {"text": "联合管理", "url": null, "status": "not_found"},
+    {"text": "DEBUG", "url": "/debug", "status": "active"},
+    {"text": "智能能效", "url": null, "status": "not_found"}
+  ],
+  "pages": {
+    "login": {
+      "url": "https://192.168.49.71/",
+      "full_url": "https://192.168.49.71/user/login",
+      "elements": {
+        "username_input": {"selector": "#username", "type": "input", "class": "ant-input"},
+        "password_input": {"selector": "#password", "type": "input", "class": "ant-input"},
+        "login_button": {"selector": "button.ant-btn-primary", "type": "button", "text": "登录"}
+      }
+    },
+    "dashboard": {
+      "url": "https://192.168.49.71/dashboard",
+      "elements": {
+        "menu_items": [
+          {"text": "首页", "class": "ant-menu-item"},
+          {"text": "系统管理", "class": "ant-menu-item"},
+          {"text": "BMC设置", "class": "ant-menu-item"},
+          {"text": "远程服务", "class": "ant-menu-item"},
+          {"text": "运维诊断", "class": "ant-menu-item menuitem-overflowed"},
+          {"text": "固件&软件", "class": "ant-menu-item menuitem-overflowed"},
+          {"text": "用户&安全", "class": "ant-menu-item menuitem-overflowed"},
+          {"text": "联合管理", "class": "ant-menu-item menuitem-overflowed"},
+          {"text": "DEBUG", "class": "ant-menu-item menuitem-overflowed"},
+          {"text": "智能能效", "class": "ant-menu-item menuitem-overflowed"}
+        ]
+      }
+    },
+    "system_management": {
+      "url": "https://192.168.49.71/system",
+      "default_subpage": "https://192.168.49.71/system/info/product_info",
+      "sidebar_menu": ["系统信息", "存储管理", "电源管理", "散热管理", "BIOS设置", "启动项设置"],
+      "buttons": ["数据导出"]
+    },
+    "bmc_setting": {
+      "url": "https://192.168.49.71/bmc_setting",
+      "default_subpage": "https://192.168.49.71/bmc_setting/network/common_config",
+      "sidebar_menu": ["网络设置", "LLDP", "NTP", "License管理"],
+      "sub_pages": {
+        "network_common": {
+          "url": "https://192.168.49.71/bmc_setting/network/common_config",
+          "tabs": ["通用配置", "专用网口", "共享网口"]
+        },
+        "lldp": {
+          "url": "https://192.168.49.71/bmc_setting/lldp",
+          "elements": {
+            "lldp_switch": {"selector": ".ant-switch", "class": "ant-switch ant-switch-small"},
+            "save_button": {"selector": "button.ant-btn-primary", "text": "保存"}
+          }
+        }
+      }
+    },
+    "remote_service": {
+      "url": "https://192.168.49.71/remote_service",
+      "default_subpage": "https://192.168.49.71/remote_service/service",
+      "sidebar_menu": ["服务设置", "远程控制台", "虚拟媒体", "SNMP"],
+      "buttons": ["查看", "修改"]
+    },
+    "remote_maintenance": {
+      "url": "https://192.168.49.71/remote_maintenance",
+      "default_subpage": "https://192.168.49.71/remote_maintenance/log/event_log",
+      "sidebar_menu": [
+        "日志", "截屏&录像", "告警设置", "配置管理", "开机自检码", 
+        "安全面板", "服务U盘", "安全擦除", "定时任务", 
+        "系统资源监控", "智能监控", "事件日志", "操作日志", "一键收集"
+      ],
+      "buttons": ["清除所有事件日志", "保存日志"]
+    },
+    "firmware_software": {
+      "url": "https://192.168.49.71/firmware",
+      "default_subpage": "https://192.168.49.71/firmware/list",
+      "sidebar_menu": ["固件清单", "安装包管理", "系统软件", "固件更新", "固件管理", "固件库"],
+      "buttons": ["清单下载"]
+    },
+    "security": {
+      "url": "https://192.168.49.71/security",
+      "default_subpage": "https://192.168.49.71/security/user/local_user",
+      "sidebar_menu": [
+        "用户管理", "防火墙", "SSL证书", "双因素认证", 
+        "SSH密钥", "KMIP服务配置", "登录安全性信息配置",
+        "安全模块", "安全仪表", "系统锁定"
+      ],
+      "user_management": {
+        "tabs": ["本地用户", "LDAP用户", "AD用户", "Kerberos用户", "SAML用户"],
+        "buttons": ["添加用户", "自定义权限", "高级设置", "弱口令字典管理"]
+      }
+    },
+    "debug": {
+      "url": "https://192.168.49.71/debug",
+      "tabs": ["告警计数", "I2C数据统计", "BMC性能"],
+      "content": {
+        "告警计数": {
+          "description": "显示SEL告警数和BIOS告警数",
+          "fields": ["屏蔽的SEL告警数", "未屏蔽的SEL告警数", "总体告警", "单次告警"],
+          "severity_levels": ["紧急", "严重", "轻微"]
+        },
+        "I2C数据统计": {
+          "description": "I2C总线数据统计信息"
+        },
+        "BMC性能": {
+          "description": "BMC性能监控数据"
+        }
+      },
+      "note": "DEBUG页面包含3个子模块，通过标签页切换"
+    }
+  },
+  "common_elements": {
+    "menu_item_by_text": ".ant-menu-item:has-text('{text}')",
+    "save_button": "button.ant-btn-primary",
+    "switch": ".ant-switch",
+    "switch_checked": ".ant-switch.ant-switch-checked"
+  },
+  "quick_operations": {
+    "login": [
+      {"type": "goto", "url": "https://192.168.49.71"},
+      {"type": "fill", "selector": "#username", "text": "admin"},
+      {"type": "fill", "selector": "#password", "text": "Password@_"},
+      {"type": "click", "selector": "button.ant-btn-primary"},
+      {"type": "wait_for_load_state", "state": "networkidle"}
+    ],
+    "enable_lldp": [
+      {"type": "goto", "url": "https://192.168.49.71/bmc_setting/lldp"},
+      {"type": "click", "selector": ".ant-switch:not(.ant-switch-checked)"},
+      {"type": "click", "selector": "button.ant-btn-primary"}
+    ],
+    "disable_lldp": [
+      {"type": "goto", "url": "https://192.168.49.71/bmc_setting/lldp"},
+      {"type": "click", "selector": ".ant-switch.ant-switch-checked"},
+      {"type": "click", "selector": "button.ant-btn-primary"}
+    ]
+  }
+}
