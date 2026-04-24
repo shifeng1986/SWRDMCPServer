@@ -8,7 +8,7 @@ SWRD MCP Server，support Redfish、IPMI、playwright command forward
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;"url": "http://localhost:8000/mcp",<br>
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;"transport": "streamable-http",<br>
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;"headers": {<br>
-&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;"Authorization": "Bearer swrd-mcp-server-token-2026"<br>
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;"Authorization": "Basic YWRtaW46YWRtaW4xMjM="<br>
 &emsp;&emsp;&emsp;&emsp;&emsp;&emsp;},<br>
 &emsp;&emsp;&emsp;&emsp;"disabled": false<br>
 &emsp;&emsp;&emsp;&emsp;}<br>
