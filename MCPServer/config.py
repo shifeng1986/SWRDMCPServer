@@ -26,6 +26,7 @@ def _load_yaml_config(filename: str) -> dict:
         with open(yaml_path, "r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     except ImportError:
+        print(f"[警告] pyyaml 未安装，无法加载配置文件: {yaml_path}，将使用默认值")
         return {}
 
 
@@ -154,3 +155,22 @@ _yaml_alert = _load_yaml_config("alert_config.yaml")
 ALERT_ENABLED = _yaml_alert.get("enabled", True)
 ALERT_MINIMUM_LEVEL = _yaml_alert.get("minimum_level", "high")
 ALERT_CHANNELS = _yaml_alert.get("channels", {})
+
+
+# ──────────────────────────────────────────────
+# 用户认证配置
+# ──────────────────────────────────────────────
+
+_yaml_auth = _yaml_sec.get("auth", {})
+
+# 是否启用用户认证
+AUTH_ENABLED = _yaml_auth.get("enabled", False)
+
+# 服务端固定 Token（为空则自动生成）
+AUTH_TOKEN = _yaml_auth.get("token", "")
+
+# 用户名/密码列表
+AUTH_USERS = _yaml_auth.get("users", {})
+
+# 用户登录 Token 有效期（秒）
+AUTH_TOKEN_EXPIRE_SECONDS = _yaml_auth.get("token_expire_seconds", 3600)

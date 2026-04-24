@@ -28,3 +28,26 @@ actions:
   high: confirm
   medium: log
   low: log
+
+# ──────────────────────────────────────────────
+# 用户认证配置
+# ──────────────────────────────────────────────
+
+# 是否启用用户认证（全局开关）
+# 启用后，所有 MCP 请求必须携带有效 Token
+auth:
+  enabled: true
+
+  # 服务端固定 Token（用于 MCP Client 配置）
+  # 若为空，则启动时自动生成随机 Token 并打印到控制台
+  # 建议生产环境设置为固定值，便于 MCP Client 配置
+  token: "swrd-mcp-server-token-2026"
+
+  # 用户名/密码列表（用于 authenticate 工具登录）
+  # 登录成功后会生成临时 Token，有效期由 token_expire_seconds 控制
+  users:
+    admin: admin123
+    operator: operator123
+
+  # 用户登录 Token 有效期（秒）
+  token_expire_seconds: 3600

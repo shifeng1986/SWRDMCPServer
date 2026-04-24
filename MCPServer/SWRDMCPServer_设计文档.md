@@ -288,7 +288,7 @@ AI Agent                    SWRDMCPServer                 PC 代理             
 ### 2.4 安全拦截数据流
 
 ```
-AI Agent                    SWRDMCPServer                 员警渠道
+AI Agent                    SWRDMCPServer                 预警渠道
     │                           │                           │
     │  sendRedfish(             │                           │
     │    method="DELETE",       │                           │
