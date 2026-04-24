@@ -103,15 +103,47 @@ provider:
 - 同一会话中相同操作可缓存确认状态
 - 确认记录必须写入审计日志
 
-## 3. Tool 开发规范
+## 3. 用户认证规范
 
-### 3.1 必须使用的装饰器
+### 3.1 认证流程
 
-每个 MCP Tool 实现必须按顺序应用以下装饰器：
+MCP Server 采用用户名/密码 + 临时 Token 的双重认证机制：
+
+1. **中间件层**：MCP Client 连接时通过 Basic Auth（用户名/密码）或 Bearer Token 认证
+2. **Tool 层**：AI Agent 调用 `authenticate` 工具获取临时 Token，后续所有业务工具调用需携带此 Token
+
+### 3.2 Token 管理要求
+
+- 临时 Token 有效期默认 3600 秒，过期后需重新认证
+- Token 存储在内存缓存中，服务重启后失效
+- 认证通过后，Token 关联的用户名会自动注入 `userName` 参数
+- `authenticate` 和 `logout` 工具不需要 Token 认证
+
+### 3.3 中间件认证方式
+
+| 方式 | Authorization 头格式 | 说明 |
+|------|---------------------|------|
+| Basic Auth | `Basic <base64(username:password)>` | 推荐用于 mcp.json 配置 |
+| Bearer Token | `Bearer <临时Token>` | authenticate 工具获取的临时 Token |
+| 服务端 Token | `Bearer <服务端Token>` | 配置文件中的固定 Token（备用） |
+
+## 4. Tool 开发规范
+
+### 4.1 必须使用的装饰器
+
+每个业务 MCP Tool 实现必须按顺序应用以下装饰器：
 
 ```python
-@with_high_risk_check      # 高危操作检查（最外层）
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def tool_function():
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check       # 高危操作检查
+@with_operation_log         # 操作日志记录
+@validate_input             # 输入参数校验
+async def tool_function(token: str, ...):
     pass
+```
+
+### 4.2 Token 参数要求
+
+- 所有业务工具必须包含 `token: str 参数`
+- `authenticate` 和 `logout` 工具不需要 `token 参数` 和 `auth_required` 装饰器
+- `token` 参数必须在 docstring 中说明：`认证Token（通过 authenticate 工具获取）`

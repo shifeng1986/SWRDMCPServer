@@ -1,11 +1,16 @@
 """
 用户认证模块
 
-提供基于 Token 的用户认证功能：
-- MCP Server 启动时生成随机 Token，或从配置文件读取固定 Token
-- 通过 Starlette 中间件拦截所有 /mcp 请求，验证 Authorization 头
-- 提供 authenticate 工具供用户登录获取 Token
-- 支持用户名/密码认证和 Token 认证两种方式
+提供基于用户名/密码 + 临时 Token 的双重认证功能：
+- 中间件层：支持 Basic Auth（用户名/密码）和 Bearer Token 两种认证方式
+- Tool 层：通过 auth_required 装饰器验证临时 Token 的有效性
+
+认证流程：
+1. MCP Client 在连接配置中设置用户名/密码（Basic Auth）或服务端 Token
+2. 中间件验证通过后放行请求
+3. AI Agent 调用 authenticate 工具，传入 username/password，获取临时 Token
+4. 后续 tool 调用携带 token 参数，Server 通过 auth_required 装饰器验证有效性
+5. Token 过期后需重新认证
 
 配置项由 config.py 统一管理，支持通过 security_config.yaml 自定义。
 """
@@ -15,6 +20,7 @@ import json
 import logging
 import secrets
 import time
+import base64
 from typing import Any, Callable, Optional
 
 from starlette.requests import Request
@@ -64,11 +70,11 @@ def get_server_token() -> str:
 
 
 def _is_valid_token(token: str) -> bool:
-    """验证 Token 是否有效"""
+    """验证 Token 是否有效（用于中间件层验证）"""
     if not token:
         return False
 
-    # 检查是否为服务端 Token
+    # 检查是否为服务端 Token（备用机制）
     if token == get_server_token():
         return True
 
@@ -82,6 +88,38 @@ def _is_valid_token(token: str) -> bool:
             del _token_cache[token]
 
     return False
+
+
+def _validate_tool_token(token: str) -> tuple[bool, str, Optional[str]]:
+    """
+    验证 tool 调用中的 Token 有效性
+
+    返回：(is_valid, message, username)
+    - is_valid: Token 是否有效
+    - message: 验证结果描述
+    - username: 关联的用户名（仅当 Token 有效时返回）
+    """
+    if not AUTH_ENABLED:
+        return True, "认证未启用", None
+
+    if not token:
+        return False, "Token 不能为空，请先调用 authenticate 工具获取 Token", None
+
+    # 检查是否为用户登录生成的 Token
+    if token in _token_cache:
+        token_info = _token_cache[token]
+        if token_info["expires_at"] > time.time():
+            return True, "Token 有效", token_info["user"]
+        else:
+            # Token 已过期，清理缓存
+            del _token_cache[token]
+            return False, "Token 已过期，请重新调用 authenticate 工具获取 Token", None
+
+    # 检查是否为服务端 Token（备用机制，允许配置的固定 Token 直接访问）
+    if token == get_server_token():
+        return True, "Token 有效（服务端 Token）", "server"
+
+    return False, "Token 无效，请先调用 authenticate 工具获取有效 Token", None
 
 
 def _authenticate_user(username: str, password: str) -> Optional[str]:
@@ -128,14 +166,91 @@ def _revoke_token(token: str) -> bool:
 
 
 # ──────────────────────────────────────────────
+# Tool 认证装饰器
+# ──────────────────────────────────────────────
+
+def auth_required(func: Callable) -> Callable:
+    """
+    Tool 认证装饰器
+
+    在 tool 函数执行前验证 token 参数的有效性。
+    仅当 AUTH_ENABLED 为 True 时生效。
+
+    使用方式：在 tool 函数参数中添加 token: str 参数，
+    装饰器会自动提取并验证该 Token。
+    """
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        # 认证未启用，直接放行
+        if not AUTH_ENABLED:
+            return await func(*args, **kwargs)
+
+        # 提取 token 参数
+        token = kwargs.get("token", "")
+        if not token:
+            # 尝试从位置参数提取
+            param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
+            for i, name in enumerate(param_names):
+                if name == "token" and i < len(args):
+                    token = args[i]
+                    break
+
+        # 验证 Token
+        is_valid, message, username = _validate_tool_token(token)
+        if not is_valid:
+            logger.warning(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "event": "tool_auth_failed",
+                        "tool": func.__name__,
+                        "reason": message,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return json.dumps(
+                {"error": "认证失败", "message": message},
+                ensure_ascii=False,
+            )
+
+        # Token 有效，将关联的用户名注入 kwargs（供后续装饰器使用）
+        if username and username != "server":
+            # 如果 userName 参数为空，自动填充认证用户名
+            if not kwargs.get("userName"):
+                kwargs["userName"] = username
+
+        logger.info(
+            json.dumps(
+                {
+                    "timestamp": time.time(),
+                    "event": "tool_auth_success",
+                    "tool": func.__name__,
+                    "user": username or "unknown",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+# ──────────────────────────────────────────────
 # 认证中间件
 # ──────────────────────────────────────────────
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """
-    Token 认证中间件
+    认证中间件
 
-    拦截所有 /mcp 请求，验证 Authorization 头中的 Token。
+    拦截所有 /mcp 请求，验证 Authorization 头，支持以下认证方式：
+    - Basic Auth：Authorization: Basic <base64(username:password)>
+    - Bearer Token：Authorization: Bearer <token>
+    - 查询参数：?token=<token>（备用方式）
+
     仅当 AUTH_ENABLED 为 True 时生效。
     """
 
@@ -148,19 +263,46 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not request.url.path.startswith("/mcp"):
             return await call_next(request)
 
-        # 从 Authorization 头提取 Token
+        # 从 Authorization 头提取认证信息
         auth_header = request.headers.get("Authorization", "")
-        token = None
+        auth_valid = False
+        auth_user = None
 
-        if auth_header.startswith("Bearer "):
+        if auth_header.startswith("Basic "):
+            # Basic Auth：用户名/密码认证
+            try:
+                decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
+                username, password = decoded.split(":", 1)
+                if username in AUTH_USERS and AUTH_USERS[username] == password:
+                    auth_valid = True
+                    auth_user = username
+                else:
+                    auth_valid = False
+            except Exception:
+                auth_valid = False
+
+        elif auth_header.startswith("Bearer "):
+            # Bearer Token：临时 Token 或服务端 Token
             token = auth_header[7:].strip()
+            auth_valid = _is_valid_token(token)
+            if auth_valid and token in _token_cache:
+                auth_user = _token_cache[token].get("user")
+
         elif auth_header.startswith("token "):
+            # token 前缀（兼容）
             token = auth_header[6:].strip()
+            auth_valid = _is_valid_token(token)
+            if auth_valid and token in _token_cache:
+                auth_user = _token_cache[token].get("user")
         else:
             # 尝试从查询参数获取（部分 MCP Client 不支持自定义 Header）
             token = request.query_params.get("token", "")
+            if token and _is_valid_token(token):
+                auth_valid = True
+                if token in _token_cache:
+                    auth_user = _token_cache[token].get("user")
 
-        if not token or not _is_valid_token(token):
+        if not auth_valid:
             logger.warning(
                 json.dumps(
                     {
@@ -175,10 +317,25 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
             return JSONResponse(
                 status_code=401,
-                content={"error": "Unauthorized", "message": "无效或缺失的认证 Token，请先调用 authenticate 工具获取 Token"},
+                content={"error": "Unauthorized", "message": "认证失败：无效的用户名/密码或 Token，请检查配置或调用 authenticate 工具获取 Token"},
             )
 
-        # Token 有效，继续处理请求
+        # 认证通过，记录用户信息
+        if auth_user:
+            logger.info(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "event": "auth_passed",
+                        "path": request.url.path,
+                        "user": auth_user,
+                        "client": request.client.host if request.client else "unknown",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+        # 继续处理请求
         return await call_next(request)
 
 
@@ -246,5 +403,7 @@ __all__ = [
     "get_server_token",
     "_authenticate_user",
     "_revoke_token",
+    "_validate_tool_token",
+    "auth_required",
     "token_endpoint",
 ]

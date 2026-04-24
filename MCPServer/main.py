@@ -9,7 +9,7 @@ import requests
 import json
 import socket
 import psutil
-from decorators import with_high_risk_check, with_operation_log, validate_input
+from decorators import with_high_risk_check, with_operation_log, validate_input, auth_required
 from decorators.security_decorator import SecurityCheckError, ConfirmationRequired
 from decorators.auth_decorator import AuthMiddleware, get_server_token, _authenticate_user, _revoke_token, token_endpoint
 from config import AUTH_ENABLED
@@ -40,7 +40,8 @@ mcp = FastMCP(
 )
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendRedfish(
@@ -51,6 +52,7 @@ async def sendRedfish(
     method: str,
     URL: str,
     body: str,
+    token: str,
     ctx: Context,
     userName: str = "",
 ) -> str:
@@ -64,6 +66,7 @@ async def sendRedfish(
         method: HTTP方法（GET/POST/PUT/PATCH/DELETE）
         URL: Redfish路径（如 /redfish/v1）
         body: 请求体（GET请求传空字符串）
+        token: 认证Token（通过 authenticate 工具获取）
         ctx: MCP上下文
         userName: IDE运行系统的登录用户名，由IDE侧传入
     """
@@ -108,7 +111,8 @@ async def sendRedfish(
 
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendIPMI(
@@ -117,6 +121,7 @@ async def sendIPMI(
     deviceUser: str,
     DevicePwd: str,
     command: str,
+    token: str,
     ctx: Context,
     userName: str = "",
 ) -> str:
@@ -128,6 +133,7 @@ async def sendIPMI(
         deviceUser: 设备登录用户名
         DevicePwd: 设备登录密码
         command: ipmitool命令（如 "mc info", "sensor list", "power status"）
+        token: 认证Token（通过 authenticate 工具获取）
         ctx: MCP上下文
         userName: IDE运行系统的登录用户名，由IDE侧传入
     """
@@ -169,16 +175,26 @@ async def sendIPMI(
 
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserOpen(
     pcIP: str,
     sessionId: str,
     headless: bool,
+    token: str,
     userName: str = "",
 ) -> str:
-    """在PC代理上打开浏览器"""
+    """在PC代理上打开浏览器
+
+    Args:
+        pcIP: PC代理的IP地址
+        sessionId: 浏览器会话ID
+        headless: 是否无头模式
+        token: 认证Token（通过 authenticate 工具获取）
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
     try:
         proxy_url = f"http://{pcIP}:8888/browser/open"
         payload = {
@@ -193,13 +209,15 @@ async def browserOpen(
 
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserRun(
     pcIP: str,
     sessionId: str,
     actions: str,
+    token: str,
     userName: str = "",
     options: str = "",
 ) -> str:
@@ -209,7 +227,7 @@ async def browserRun(
     支持的操作类型（actions参数为JSON数组）：
     - {"type":"goto","url":"http://..."} - 导航到URL
     - {"type":"click","selector":"#btn"} - 点击元素
-    - {"type":"fill","selector":"#input","text":"value"} - 填写输入框
+    - {"type":"fill","selector":"#input","text":"value"} - 塅写输入框
     - {"type":"press","selector":"#input","key":"Enter"} - 按键
     - {"type":"wait_for_selector","selector":"#elem"} - 等待元素出现
     - {"type":"wait_for_load_state","state":"networkidle"} - 等待页面加载
@@ -225,6 +243,14 @@ async def browserRun(
     
     示例actions参数：
     '[{"type":"goto","url":"http://192.168.49.71"},{"type":"get_page_info"}]'
+    
+    Args:
+        pcIP: PC代理的IP地址
+        sessionId: 浏览器会话ID
+        actions: 操作JSON数组
+        token: 认证Token（通过 authenticate 工具获取）
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+        options: 可选配置JSON
     """
     try:
         proxy_url = f"http://{pcIP}:8888/browser/run"
@@ -241,16 +267,26 @@ async def browserRun(
 
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserScreenshot(
     pcIP: str,
     sessionId: str,
     fullPage: bool,
+    token: str,
     userName: str = "",
 ) -> str:
-    """截取浏览器当前页面的截图（注意：可能超时，建议使用get_page_info等替代）"""
+    """截取浏览器当前页面的截图（注意：可能超时，建议使用get_page_info等替代）
+
+    Args:
+        pcIP: PC代理的IP地址
+        sessionId: 浏览器会话ID
+        fullPage: 是否全页截图
+        token: 认证Token（通过 authenticate 工具获取）
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
     try:
         proxy_url = f"http://{pcIP}:8888/browser/screenshot"
         payload = {
@@ -264,15 +300,24 @@ async def browserScreenshot(
 
 
 @mcp.tool()
-@with_high_risk_check      # 高危操作检查（最外层）
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserClose(
     pcIP: str,
     sessionId: str,
+    token: str,
     userName: str = "",
 ) -> str:
-    """关闭浏览器会话"""
+    """关闭浏览器会话
+
+    Args:
+        pcIP: PC代理的IP地址
+        sessionId: 浏览器会话ID
+        token: 认证Token（通过 authenticate 工具获取）
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
     try:
         proxy_url = f"http://{pcIP}:8888/browser/close"
         payload = {"sessionId": sessionId}
@@ -348,10 +393,14 @@ if __name__ == "__main__":
         server_token = get_server_token()
         print(f"\n{'='*60}")
         print(f"[认证] 用户认证已启用")
-        print(f"[认证] 服务端 Token: {server_token}")
-        print(f"[认证] 请将此 Token 配置到 MCP Client 的 Authorization 头中")
-        print(f"[认证] 格式: Authorization: Bearer {server_token}")
-        print(f"[认证] 或使用用户名/密码获取 Token: POST /auth/token")
+        print(f"[认证] 支持以下认证方式：")
+        print(f"[认证]   1. Basic Auth（推荐）：在 mcp.json 中配置用户名/密码")
+        print(f"[认证]      格式: Authorization: Basic <base64(username:password)>")
+        print(f"[认证]   2. Bearer Token：使用服务端固定 Token")
+        print(f"[认证]      服务端 Token: {server_token}")
+        print(f"[认证]      格式: Authorization: Bearer {server_token}")
+        print(f"[认证]   3. 临时 Token：调用 authenticate 工具获取")
+        print(f"[认证]      或使用用户名/密码获取 Token: POST /auth/token")
         print(f"{'='*60}\n")
         # 手动启动 uvicorn，使用已注册中间件的 app
         import uvicorn
