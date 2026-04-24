@@ -15,6 +15,9 @@ SWRD MCP Server，support Redfish、IPMI、playwright command forward
 &emsp;&emsp;}<br>
 }<br>
 <br>
+<br>
 2、在.codebuddy/rules/SystemTest.mdc中，修改相关的配置为自己环境的配置。<br>
-
+<br>
+<br>
+3、修改MCPServer.py的代码时，需注意引用MCPServer.mdc的rules文件。
 
