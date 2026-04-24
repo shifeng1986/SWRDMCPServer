@@ -1,0 +1,2 @@
+MCPServer/logs/*.log
+__pycache__/

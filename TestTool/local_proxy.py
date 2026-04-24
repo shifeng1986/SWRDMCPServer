@@ -15,9 +15,19 @@ Local Proxy 代理转发工具
 
 import http.server
 import json
+import subprocess
 import threading
 import time
+import os
+import re
+import sys
 from typing import Any
+from socketserver import ThreadingMixIn
+
+try:
+    import requests as _requests
+except Exception:
+    _requests = None
 
 try:
     from playwright.sync_api import sync_playwright
@@ -27,6 +37,98 @@ except Exception:
 _thread_local = threading.local()
 _SESSIONS: dict[str, dict[str, Any]] = {}
 _SESSIONS_LOCK = threading.Lock()
+
+# TFTP服务器
+_firmware_tftp_process = None
+_firmware_tftp_port = 69  # TFTP标准端口
+_firmware_dir = r"C:\firmware_upgrade"
+_tftp_server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tftp_server.py")
+
+
+def start_firmware_tftp_server():
+    """启动固件文件TFTP服务器 - 使用Python实现"""
+    global _firmware_tftp_process
+
+    # 检查TFTP服务器是否真的在运行
+    if _firmware_tftp_process is not None:
+        # 检查进程是否还在运行
+        if _firmware_tftp_process.poll() is None:
+            return {"ok": True, "message": "TFTP服务器已在运行"}
+        else:
+            # 进程已退出，重置状态
+            print(f"[TFTP服务器] 检测到进程已退出，重置状态")
+            _firmware_tftp_process = None
+
+    try:
+        # 检查固件目录是否存在
+        if not os.path.exists(_firmware_dir):
+            os.makedirs(_firmware_dir, exist_ok=True)
+            print(f"[TFTP服务器] 创建固件目录: {_firmware_dir}")
+
+        # 检查TFTP服务器脚本是否存在
+        if not os.path.exists(_tftp_server_script):
+            return {"ok": False, "error": f"TFTP服务器脚本不存在: {_tftp_server_script}"}
+
+        # 启动Python TFTP服务器
+        # 使用CREATE_NEW_PROCESS_GROUP避免父进程影响
+        cmd = ["python", _tftp_server_script]
+        _firmware_tftp_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=_firmware_dir,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0
+        )
+
+        # 等待一小段时间，检查进程是否成功启动
+        time.sleep(3)
+        if _firmware_tftp_process.poll() is None:
+            print(f"[TFTP服务器] Python TFTP服务器已启动，PID: {_firmware_tftp_process.pid}")
+            print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
+            print(f"[TFTP服务器] 固件目录: {_firmware_dir}")
+            print(f"[TFTP服务器] 块大小: 8192字节")
+            print(f"[TFTP服务器] 超时时间: 60秒，最大重试次数: 10")
+            return {"ok": True, "message": f"TFTP服务器已启动，监听端口 {_firmware_tftp_port}，工作目录: {_firmware_dir}"}
+        else:
+            # 进程已退出，启动失败
+            stdout, stderr = _firmware_tftp_process.communicate()
+            error_msg = stderr.decode() if stderr else stdout.decode()
+            _firmware_tftp_process = None
+            print(f"[TFTP服务器] 启动失败: {error_msg}")
+            return {"ok": False, "error": f"TFTP服务器启动失败: {error_msg}"}
+
+    except Exception as e:
+        print(f"[TFTP服务器] 启动失败: {e}")
+        _firmware_tftp_process = None
+        return {"ok": False, "error": str(e)}
+
+
+def stop_firmware_tftp_server():
+    """停止固件文件TFTP服务器"""
+    global _firmware_tftp_process
+
+    if _firmware_tftp_process is None:
+        return {"ok": True, "message": "TFTP服务器未运行"}
+
+    try:
+        # 终止tftpd32.exe进程
+        _firmware_tftp_process.terminate()
+        # 等待进程结束
+        try:
+            _firmware_tftp_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # 如果进程没有正常退出，强制杀死
+            _firmware_tftp_process.kill()
+            _firmware_tftp_process.wait()
+
+        _firmware_tftp_process = None
+        print("[TFTP服务器] 已停止")
+        return {"ok": True, "message": "TFTP服务器已停止"}
+    except Exception as e:
+        print(f"[TFTP服务器] 停止失败: {e}")
+        return {"ok": False, "error": str(e)}
+
+
 
 def _get_playwright():
     if sync_playwright is None:
@@ -206,12 +308,24 @@ def _run_actions(session_id: str, actions: list, options: dict | None = None):
 
 class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path == "/browser/open":
+        if self.path == "/redfish":
+            self._handle_redfish()
+        elif self.path == "/ipmi":
+            self._handle_ipmi()
+        elif self.path == "/browser/open":
             self._handle_browser_open()
         elif self.path == "/browser/run":
             self._handle_browser_run()
         elif self.path == "/browser/close":
             self._handle_browser_close()
+        elif self.path == "/firmware/download":
+            self._handle_firmware_download()
+        elif self.path == "/firmware/upload":
+            self._handle_firmware_upload()
+        elif self.path == "/firmware/tftp/start":
+            self._handle_firmware_tftp_start()
+        elif self.path == "/firmware/tftp/stop":
+            self._handle_firmware_tftp_stop()
         else:
             self._send_error_response(404, f"路径不存在: {self.path}")
 
@@ -235,6 +349,81 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.client_address[0]} - {format % args}")
+
+    def _handle_redfish(self):
+        """转发 Redfish 请求到目标设备"""
+        try:
+            payload = self._read_payload() or {}
+            device_ip = payload.get("deviceIP", "")
+            device_user = payload.get("deviceUser", "")
+            device_pwd = payload.get("devicePwd", "")
+            method = payload.get("method", "GET").upper()
+            url = payload.get("url", "")
+            body = payload.get("body", "")
+            
+            if not device_ip or not url:
+                self._send_error_response(400, "缺少 deviceIP 或 url")
+                return
+            
+            full_url = f"https://{device_ip}{url}"
+            auth = (device_user, device_pwd) if device_user else None
+            data = body if body else None
+            
+            if _requests is None:
+                self._send_error_response(500, "requests 库未安装")
+                return
+            
+            resp = _requests.request(
+                method=method,
+                url=full_url,
+                auth=auth,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                verify=False,
+                timeout=30,
+            )
+            result = {
+                "status_code": resp.status_code,
+                "body": resp.text
+            }
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"Redfish 请求失败: {e}")
+
+    def _handle_ipmi(self):
+        """执行 IPMI 命令"""
+        try:
+            payload = self._read_payload() or {}
+            device_ip = payload.get("deviceIP", "")
+            device_user = payload.get("deviceUser", "")
+            device_pwd = payload.get("devicePwd", "")
+            command = payload.get("command", "")
+            
+            if not device_ip or not command:
+                self._send_error_response(400, "缺少 deviceIP 或 command")
+                return
+            
+            cmd = [
+                "ipmitool", "-I", "lanplus",
+                "-H", device_ip,
+                "-U", device_user,
+                "-P", device_pwd,
+            ] + command.split()
+            
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            result = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr
+            }
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"IPMI 命令失败: {e}")
 
     def _handle_browser_open(self):
         try:
@@ -276,30 +465,255 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self._send_error_response(500, f"browser close 失败: {e}")
 
+    def _handle_firmware_download(self):
+        """从FTP服务器下载固件到PC代理"""
+        try:
+            payload = self._read_payload() or {}
+            
+            ftp_server = payload.get("ftpServer", "")
+            ftp_user = payload.get("ftpUser", "")
+            ftp_password = payload.get("ftpPassword", "")
+            firmware_path = payload.get("firmwarePath", "")
+            local_dir = payload.get("localDir", "C:\\firmware_upgrade")
+            local_filename = payload.get("localFilename", "firmware.bin")
+            
+            if not all([ftp_server, ftp_user, ftp_password, firmware_path]):
+                self._send_error_response(400, "缺少FTP服务器信息")
+                return
+            
+            # 创建本地目录
+            import os
+            os.makedirs(local_dir, exist_ok=True)
+            
+            # 构建FTP URL
+            ftp_url = f"ftp://{ftp_user}:{ftp_password}@{ftp_server}{firmware_path}"
+            local_path = os.path.join(local_dir, local_filename)
+            
+            # 使用curl下载
+            cmd = ["curl", "-o", local_path, ftp_url]
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            # 检查文件是否存在并获取大小
+            file_size = 0
+            if os.path.exists(local_path):
+                file_size = os.path.getsize(local_path)
+            
+            result = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "local_path": local_path,
+                "file_size": file_size,
+                "success": proc.returncode == 0 and file_size > 0
+            }
+            
+            self.log_message("固件下载完成: %s, 大小: %d bytes", local_path, file_size)
+            self._send_json(200, result)
+        except Exception as e:
+            self.log_message("固件下载失败: %s", str(e))
+            self._send_error_response(500, f"固件下载失败: {e}")
+
+    def _handle_firmware_upload(self):
+        """通过TFTP上传固件到BMC设备（优先方式）"""
+        try:
+            payload = self._read_payload() or {}
+
+            device_ip = payload.get("deviceIP", "")
+            device_user = payload.get("deviceUser", "")
+            device_pwd = payload.get("DevicePwd", "")
+            local_path = payload.get("localPath", "")
+            preserve = payload.get("preserve", "Retain")
+            reboot_mode = payload.get("rebootMode", "Auto")
+            pc_ip = payload.get("pcIP", "192.168.33.199")  # PC代理的设备网IP
+
+            # 如果没有指定本地路径，使用默认路径
+            if not local_path:
+                # 尝试从固件路径参数中提取文件名
+                firmware_path = payload.get("firmwarePath", "")
+                if firmware_path:
+                    local_filename = os.path.basename(firmware_path)
+                    local_path = os.path.join(_firmware_dir, local_filename)
+                    self.log_message("使用固件路径参数: %s", local_path)
+                else:
+                    self._send_error_response(400, "缺少 localPath 或 firmwarePath 参数")
+                    return
+
+            if not all([device_ip, device_user, device_pwd]):
+                self._send_error_response(400, "缺少必要参数")
+                return
+
+            # 检查文件是否存在
+            import os
+            if not os.path.exists(local_path):
+                self._send_error_response(404, f"固件文件不存在: {local_path}")
+                return
+
+            # 获取固件文件名
+            firmware_filename = os.path.basename(local_path)
+            self.log_message("固件文件名: %s", firmware_filename)
+
+            # 步骤1: 启动TFTP服务器
+            self.log_message("步骤1: 启动TFTP服务器...")
+            tftp_result = start_firmware_tftp_server()
+            if not tftp_result.get("ok"):
+                self.log_message("TFTP服务器启动失败: %s", tftp_result.get("error"))
+                # TFTP启动失败，回退到HTTP方式
+                self.log_message("回退到HTTP上传方式...")
+                return self._upload_via_http(device_ip, device_user, device_pwd,
+                                            local_path, preserve, reboot_mode)
+
+            self.log_message("TFTP服务器启动成功")
+
+            # 步骤2: 构建TFTP URI
+            tftp_uri = f"tftp://{pc_ip}/{firmware_filename}"
+            self.log_message("步骤2: TFTP URI: %s", tftp_uri)
+
+            # 步骤3: 通过Redfish SimpleUpdate接口触发固件升级
+            self.log_message("步骤3: 通过Redfish触发固件升级...")
+            upgrade_url = f"https://{device_ip}/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate"
+
+            # 构建请求体
+            request_body = {
+                "ImageURI": tftp_uri,
+                "Oem": {
+                    "Public": {
+                        "Preserve": preserve,
+                        "RebootMode": reboot_mode
+                    }
+                }
+            }
+
+            # 使用curl发送Redfish请求
+            cmd = [
+                "curl", "-k", "-X", "POST", upgrade_url,
+                "-u", f"{device_user}:{device_pwd}",
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps(request_body, ensure_ascii=False)
+            ]
+
+            self.log_message("发送Redfish请求到: %s", upgrade_url)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            result = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "tftp_uri": tftp_uri,
+                "method": "TFTP",
+                "success": proc.returncode == 0
+            }
+
+            self.log_message("固件升级请求完成: 返回码: %d", proc.returncode)
+
+            # 升级请求成功后停止TFTP服务器
+            if proc.returncode == 0:
+                self.log_message("固件升级请求成功，停止TFTP服务器...")
+                stop_result = stop_firmware_tftp_server()
+                result["tftp_stopped"] = stop_result.get("ok", False)
+                result["tftp_stop_message"] = stop_result.get("message", "")
+                if stop_result.get("ok"):
+                    self.log_message("TFTP服务器已停止")
+                else:
+                    self.log_message("TFTP服务器停止失败: %s", stop_result.get("error", "未知错误"))
+
+            self._send_json(200, result)
+        except Exception as e:
+            self.log_message("固件上传失败: %s", str(e))
+            self._send_error_response(500, f"固件上传失败: {e}")
+
+    def _upload_via_http(self, device_ip: str, device_user: str, device_pwd: str,
+                        local_path: str, preserve: str, reboot_mode: str):
+        """通过HTTP multipart/form-data上传固件到BMC设备（备用方式）"""
+        try:
+            self.log_message("使用HTTP方式上传固件: %s", local_path)
+
+            # 使用curl multipart/form-data上传到H3C BMC的UpdateService接口
+            upload_url = f"https://{device_ip}/redfish/v1/UpdateService"
+
+            # 构建curl命令 - 使用form-data格式
+            cmd = [
+                "curl", "-k", "-X", "PATCH", upload_url,
+                "-u", f"{device_user}:{device_pwd}"
+            ]
+
+            # 添加form-data字段
+            cmd.extend(["-F", f"rom.ima=@{local_path}"])
+
+            # 如果有其他参数，可以添加
+            if preserve:
+                cmd.extend(["-F", f"Preserve={preserve}"])
+            if reboot_mode:
+                cmd.extend(["-F", f"RebootMode={reboot_mode}"])
+
+            self.log_message("开始HTTP上传固件到: %s", upload_url)
+
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+
+            result = {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+                "method": "HTTP",
+                "success": proc.returncode == 0
+            }
+
+            self.log_message("HTTP固件上传完成: 返回码: %d", proc.returncode)
+
+            self._send_json(200, result)
+        except Exception as e:
+            self.log_message("HTTP固件上传失败: %s", str(e))
+            self._send_error_response(500, f"HTTP固件上传失败: {e}")
+
+    def _handle_firmware_tftp_start(self):
+        """启动固件文件TFTP服务器"""
+        try:
+            result = start_firmware_tftp_server()
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"启动TFTP服务器失败: {e}")
+
+    def _handle_firmware_tftp_stop(self):
+        """停止固件文件TFTP服务器"""
+        try:
+            result = stop_firmware_tftp_server()
+            self._send_json(200, result)
+        except Exception as e:
+            self._send_error_response(500, f"停止TFTP服务器失败: {e}")
+
 
 def run_proxy_server(host="0.0.0.0", port=8888):
     server_address = (host, port)
     httpd = http.server.HTTPServer(server_address, LocalProxyHandler)
     
     print(f"Local Proxy 启动: http://{host}:{port}")
-    print("模式: 单线程，支持非截图操作")
-    print("\n支持的操作类型:")
-    print("  - goto: 导航到URL")
-    print("  - click: 点击元素")
-    print("  - fill: 填写输入框")
-    print("  - press: 按键")
-    print("  - wait_for_selector: 等待元素")
-    print("  - wait_for_load_state: 等待页面加载")
-    print("  - get_text: 获取元素文本")
-    print("  - get_html: 获取元素HTML")
-    print("  - get_attribute: 获取元素属性")
-    print("  - eval: 执行JavaScript")
-    print("  - get_all_links: 获取所有链接")
-    print("  - get_all_inputs: 获取所有输入框")
-    print("  - get_all_buttons: 获取所有按钮")
-    print("  - get_page_info: 获取页面信息")
-    print("  - query_selector_all: 查询多个元素")
-    
+    print("模式: 单线程，支持 Redfish/IPMI 转发和浏览器控制")
+    print("\n支持的路径:")
+    print("  - /redfish: 转发 Redfish 请求到目标设备")
+    print("  - /ipmi: 执行 IPMI 命令")
+    print("  - /browser/open: 打开浏览器")
+    print("  - /browser/run: 执行浏览器操作")
+    print("  - /browser/close: 关闭浏览器")
+    print("  - /firmware/download: 从FTP下载固件")
+    print("  - /firmware/upload: 上传固件到BMC")
+    print("  - /firmware/tftp/start: 启动固件TFTP服务器")
+    print("  - /firmware/tftp/stop: 停止固件TFTP服务器")
+    print("\n注意: TFTP服务器需要手动启动，使用 /firmware/tftp/start 接口")
+
     httpd.serve_forever()
 
 

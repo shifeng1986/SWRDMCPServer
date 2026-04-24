@@ -381,6 +381,144 @@ async def logout(
         return json.dumps({"status": "error", "message": "Token 不存在或已过期"}, ensure_ascii=False, indent=2)
 
 
+@mcp.tool()
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def firmwareDownload(
+    pcIP: str,
+    ftpServer: str,
+    ftpUser: str,
+    ftpPassword: str,
+    firmwarePath: str,
+    token: str,
+    ctx: Context,
+    localDir: str = "C:\\firmware_upgrade",
+    localFilename: str = "firmware.bin",
+    userName: str = "",
+) -> str:
+    """从FTP服务器下载固件到PC代理
+
+    Args:
+        pcIP: PC代理的IP地址
+        ftpServer: FTP服务器地址
+        ftpUser: FTP用户名
+        ftpPassword: FTP密码
+        firmwarePath: 固件文件路径
+        token: 认证Token（通过 authenticate 工具获取）
+        ctx: MCP上下文
+        localDir: 本地保存目录
+        localFilename: 本地文件名
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
+    proxy_url = f"http://{pcIP}:8888/firmware/download"
+    payload = {
+        "ftpServer": ftpServer,
+        "ftpUser": ftpUser,
+        "ftpPassword": ftpPassword,
+        "firmwarePath": firmwarePath,
+        "localDir": localDir,
+        "localFilename": localFilename
+    }
+
+    try:
+        response = requests.post(proxy_url, json=payload, timeout=300)
+        return response.text
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def firmwareUpload(
+    pcIP: str,
+    deviceIP: str,
+    deviceUser: str,
+    DevicePwd: str,
+    localPath: str,
+    token: str,
+    ctx: Context,
+    preserve: str = "Retain",
+    rebootMode: str = "Auto",
+    userName: str = "",
+) -> str:
+    """通过HTTP上传固件到BMC设备
+
+    Args:
+        pcIP: PC代理的IP地址
+        deviceIP: BMC设备IP地址
+        deviceUser: 设备用户名
+        DevicePwd: 设备密码
+        localPath: 固件文件本地路径
+        token: 认证Token（通过 authenticate 工具获取）
+        ctx: MCP上下文
+        preserve: 配置保留策略（Retain/Restore/ForceRestore）
+        rebootMode: 重启模式（Auto/Manual）
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
+    proxy_url = f"http://{pcIP}:8888/firmware/upload"
+    payload = {
+        "deviceIP": deviceIP,
+        "deviceUser": deviceUser,
+        "DevicePwd": DevicePwd,
+        "localPath": localPath,
+        "preserve": preserve,
+        "rebootMode": rebootMode
+    }
+
+    try:
+        response = requests.post(proxy_url, json=payload, timeout=300)
+        return response.text
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def firmwareStatus(
+    pcIP: str,
+    deviceIP: str,
+    deviceUser: str,
+    DevicePwd: str,
+    token: str,
+    ctx: Context,
+    userName: str = "",
+) -> str:
+    """查询固件升级状态
+
+    Args:
+        pcIP: PC代理的IP地址
+        deviceIP: BMC设备IP地址
+        deviceUser: 设备用户名
+        DevicePwd: 设备密码
+        token: 认证Token（通过 authenticate 工具获取）
+        ctx: MCP上下文
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
+    proxy_url = f"http://{pcIP}:8888/redfish"
+    payload = {
+        "deviceIP": deviceIP,
+        "deviceUser": deviceUser,
+        "devicePwd": DevicePwd,
+        "method": "GET",
+        "url": "/redfish/v1/UpdateService",
+        "body": ""
+    }
+
+    try:
+        response = requests.post(proxy_url, json=payload, timeout=60)
+        return response.text
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     # 注册认证中间件
     if AUTH_ENABLED:
