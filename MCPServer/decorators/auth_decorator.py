@@ -32,6 +32,7 @@ from config import (
     AUTH_USERS,
     AUTH_TOKEN,
     AUTH_TOKEN_EXPIRE_SECONDS,
+    LDAP_ENABLED,
 )
 
 from .logging_decorator import logger
@@ -325,15 +326,34 @@ class AuthMiddleware(BaseHTTPMiddleware):
         auth_user = None
 
         if auth_header.startswith("Basic "):
-            # Basic Auth：用户名/密码认证
+            # Basic Auth：用户名/密码认证（优先使用LDAP）
             try:
                 decoded = base64.b64decode(auth_header[6:].strip()).decode("utf-8")
                 username, password = decoded.split(":", 1)
-                if username in AUTH_USERS and AUTH_USERS[username] == password:
-                    auth_valid = True
-                    auth_user = username
+                
+                # 优先尝试LDAP认证
+                if LDAP_ENABLED:
+                    try:
+                        from ldap_auth import authenticate_with_ldap
+                        is_valid, message = authenticate_with_ldap(username, password)
+                        if is_valid:
+                            auth_valid = True
+                            auth_user = username
+                        else:
+                            # LDAP认证失败，尝试本地认证
+                            if username in AUTH_USERS and AUTH_USERS[username] == password:
+                                auth_valid = True
+                                auth_user = username
+                    except Exception as e:
+                        # LDAP认证出错，尝试本地认证
+                        if username in AUTH_USERS and AUTH_USERS[username] == password:
+                            auth_valid = True
+                            auth_user = username
                 else:
-                    auth_valid = False
+                    # LDAP未启用，使用本地认证
+                    if username in AUTH_USERS and AUTH_USERS[username] == password:
+                        auth_valid = True
+                        auth_user = username
             except Exception:
                 auth_valid = False
 
