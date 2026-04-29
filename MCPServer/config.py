@@ -169,8 +169,33 @@ AUTH_ENABLED = _yaml_auth.get("enabled", False)
 # 服务端固定 Token（为空则自动生成）
 AUTH_TOKEN = _yaml_auth.get("token", "")
 
-# 用户名/密码列表
+# 用户名/密码列表（本地认证备用）
 AUTH_USERS = _yaml_auth.get("users", {})
 
 # 用户登录 Token 有效期（秒）
 AUTH_TOKEN_EXPIRE_SECONDS = _yaml_auth.get("token_expire_seconds", 3600)
+
+
+# ──────────────────────────────────────────────
+# LDAP认证配置
+# ──────────────────────────────────────────────
+
+_yaml_ldap = _yaml_auth.get("ldap", {})
+
+# 是否启用LDAP认证
+LDAP_ENABLED = _yaml_ldap.get("enabled", False)
+
+# LDAP服务器URI
+LDAP_SERVER_URI = _yaml_ldap.get("server_uri", "ldap://127.0.0.1:389")
+
+# LDAP绑定DN（用于搜索用户）
+LDAP_BIND_DN = _yaml_ldap.get("bind_dn", "")
+
+# LDAP绑定密码
+LDAP_BIND_PASSWORD = _yaml_ldap.get("bind_password", "")
+
+# LDAP用户搜索基础DN
+LDAP_USER_SEARCH_BASE = _yaml_ldap.get("user_search_base", "")
+
+# LDAP用户搜索过滤器
+LDAP_USER_SEARCH_FILTER = _yaml_ldap.get("user_search_filter", "(sAMAccountName=%(user)s)")

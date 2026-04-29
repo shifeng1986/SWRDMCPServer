@@ -519,6 +519,64 @@ async def firmwareStatus(
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
+@mcp.tool()
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def tftpServerStart(
+    pcIP: str,
+    token: str,
+    ctx: Context,
+    userName: str = "",
+) -> str:
+    """在PC代理上启动TFTP服务器
+
+    Args:
+        pcIP: PC代理的IP地址（大网IP，如 10.41.112.148）
+        token: 认证Token（通过 authenticate 工具获取）
+        ctx: MCP上下文
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
+    proxy_url = f"http://{pcIP}:8888/firmware/tftp/start"
+    payload = {}
+
+    try:
+        response = requests.post(proxy_url, json=payload, timeout=30)
+        return response.text
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_required              # Token 认证检查（最外层）
+@with_high_risk_check      # 高危操作检查
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def tftpServerStop(
+    pcIP: str,
+    token: str,
+    ctx: Context,
+    userName: str = "",
+) -> str:
+    """在PC代理上停止TFTP服务器
+
+    Args:
+        pcIP: PC代理的IP地址（大网IP，如 10.41.112.148）
+        token: 认证Token（通过 authenticate 工具获取）
+        ctx: MCP上下文
+        userName: IDE运行系统的登录用户名，由IDE侧传入
+    """
+    proxy_url = f"http://{pcIP}:8888/firmware/tftp/stop"
+    payload = {}
+
+    try:
+        response = requests.post(proxy_url, json=payload, timeout=30)
+        return response.text
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     # 注册认证中间件
     if AUTH_ENABLED:

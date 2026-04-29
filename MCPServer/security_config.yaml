@@ -43,11 +43,33 @@ auth:
   # 建议生产环境设置为固定值，便于 MCP Client 配置
   token: "swrd-mcp-server-token-2026"
 
-  # 用户名/密码列表（用于 authenticate 工具登录）
+  # 用户名/密码列表（用于 authenticate 工具登录，本地认证备用）
   # 登录成功后会生成临时 Token，有效期由 token_expire_seconds 控制
   users:
     admin: admin123
     operator: operator123
-
+  
   # 用户登录 Token 有效期（秒）
   token_expire_seconds: 3600
+
+  # ──────────────────────────────────────────────
+  # LDAP认证配置
+  # ──────────────────────────────────────────────
+  ldap:
+    # 是否启用LDAP认证（优先级高于本地认证）
+    enabled: true
+
+    # LDAP服务器URI
+    server_uri: "ldap://10.153.0.61:3268"
+
+    # LDAP绑定DN（用于搜索用户）
+    bind_dn: "Apprdswrdpubsyn@h3c.huawei-3com.com"
+
+    # LDAP绑定密码
+    bind_password: "Public_SWRD"
+
+    # LDAP用户搜索基础DN
+    user_search_base: "dc=h3c,dc=huawei-3com,dc=com"
+
+    # LDAP用户搜索过滤器
+    user_search_filter: "(sAMAccountName=%(user)s)"

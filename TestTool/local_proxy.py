@@ -30,6 +30,11 @@ except Exception:
     _requests = None
 
 try:
+    import psutil as _psutil
+except Exception:
+    _psutil = None
+
+try:
     from playwright.sync_api import sync_playwright
 except Exception:
     sync_playwright = None
@@ -42,11 +47,11 @@ _SESSIONS_LOCK = threading.Lock()
 _firmware_tftp_process = None
 _firmware_tftp_port = 69  # TFTP标准端口
 _firmware_dir = r"C:\firmware_upgrade"
-_tftp_server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tftp_server.py")
+_tftpd32_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tftpd32.exe")
 
 
 def start_firmware_tftp_server():
-    """启动固件文件TFTP服务器 - 使用Python实现"""
+    """启动固件文件TFTP服务器 - 使用tftpd32.exe实现"""
     global _firmware_tftp_process
 
     # 检查TFTP服务器是否真的在运行
@@ -65,37 +70,53 @@ def start_firmware_tftp_server():
             os.makedirs(_firmware_dir, exist_ok=True)
             print(f"[TFTP服务器] 创建固件目录: {_firmware_dir}")
 
-        # 检查TFTP服务器脚本是否存在
-        if not os.path.exists(_tftp_server_script):
-            return {"ok": False, "error": f"TFTP服务器脚本不存在: {_tftp_server_script}"}
+        # 检查tftpd32.exe是否存在
+        if not os.path.exists(_tftpd32_exe):
+            return {"ok": False, "error": f"tftpd32.exe不存在: {_tftpd32_exe}"}
 
-        # 启动Python TFTP服务器
-        # 使用CREATE_NEW_PROCESS_GROUP避免父进程影响
-        cmd = ["python", _tftp_server_script]
+        # 不重新创建配置文件，使用现有的tftpd32.ini
+        tftpd32_ini = os.path.join(os.path.dirname(_tftpd32_exe), "tftpd32.ini")
+
+        print(f"[TFTP服务器] 使用现有配置文件: {tftpd32_ini}")
+        print(f"[TFTP服务器] TFTP根目录: {_firmware_dir}")
+        print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
+
+        # 启动tftpd32.exe TFTP服务器
+        # tftpd32.exe会自动读取同目录下的tftpd32.ini配置文件
+        # 直接启动tftpd32.exe，不使用start命令
+        tftp_dir = os.path.dirname(_tftpd32_exe)
+        cmd = [_tftpd32_exe]
+
+        print(f"[TFTP服务器] 启动命令: {cmd[0]}")
+
+        # 直接启动tftpd32.exe，使用CREATE_NEW_CONSOLE在新窗口中运行
         _firmware_tftp_process = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=_firmware_dir,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if hasattr(subprocess, 'CREATE_NEW_PROCESS_GROUP') else 0
+            cwd=tftp_dir,
+            creationflags=subprocess.CREATE_NEW_CONSOLE
         )
 
-        # 等待一小段时间，检查进程是否成功启动
-        time.sleep(3)
-        if _firmware_tftp_process.poll() is None:
-            print(f"[TFTP服务器] Python TFTP服务器已启动，PID: {_firmware_tftp_process.pid}")
-            print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
-            print(f"[TFTP服务器] 固件目录: {_firmware_dir}")
-            print(f"[TFTP服务器] 块大小: 8192字节")
-            print(f"[TFTP服务器] 超时时间: 60秒，最大重试次数: 10")
-            return {"ok": True, "message": f"TFTP服务器已启动，监听端口 {_firmware_tftp_port}，工作目录: {_firmware_dir}"}
-        else:
-            # 进程已退出，启动失败
-            stdout, stderr = _firmware_tftp_process.communicate()
-            error_msg = stderr.decode() if stderr else stdout.decode()
+        # 等待一段时间让TFTP服务器启动
+        time.sleep(5)
+
+        # 检查端口是否被监听
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # 尝试绑定端口，如果失败说明端口已被占用
+            sock.bind(("0.0.0.0", _firmware_tftp_port))
+            sock.close()
+            # 端口未被占用，启动失败
             _firmware_tftp_process = None
-            print(f"[TFTP服务器] 启动失败: {error_msg}")
-            return {"ok": False, "error": f"TFTP服务器启动失败: {error_msg}"}
+            print(f"[TFTP服务器] 启动失败：端口 {_firmware_tftp_port} 未被监听")
+            return {"ok": False, "error": f"TFTP服务器启动失败：端口 {_firmware_tftp_port} 未被监听"}
+        except socket.error:
+            # 端口已被占用，说明TFTP服务器已成功启动
+            sock.close()
+            print(f"[TFTP服务器] tftpd32.exe TFTP服务器已启动")
+            print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
+            print(f"[TFTP服务器] 工作目录: {_firmware_dir}")
+            return {"ok": True, "message": f"TFTP服务器已启动，监听端口 {_firmware_tftp_port}，工作目录: {_firmware_dir}"}
 
     except Exception as e:
         print(f"[TFTP服务器] 启动失败: {e}")
@@ -107,23 +128,50 @@ def stop_firmware_tftp_server():
     """停止固件文件TFTP服务器"""
     global _firmware_tftp_process
 
-    if _firmware_tftp_process is None:
-        return {"ok": True, "message": "TFTP服务器未运行"}
-
-    try:
-        # 终止tftpd32.exe进程
-        _firmware_tftp_process.terminate()
-        # 等待进程结束
+    # 先尝试停止已记录的进程
+    if _firmware_tftp_process is not None:
         try:
-            _firmware_tftp_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            # 如果进程没有正常退出，强制杀死
-            _firmware_tftp_process.kill()
-            _firmware_tftp_process.wait()
+            _firmware_tftp_process.terminate()
+            try:
+                _firmware_tftp_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _firmware_tftp_process.kill()
+                _firmware_tftp_process.wait()
+            print("[TFTP服务器] 已停止记录的进程")
+        except Exception as e:
+            print(f"[TFTP服务器] 停止记录的进程失败: {e}")
+
+    # 查找并停止所有tftpd32.exe进程
+    try:
+        if _psutil is None:
+            return {"ok": False, "error": "psutil模块未安装，无法查找和停止tftpd32进程"}
+
+        killed_count = 0
+        print("[TFTP服务器] 开始查找tftpd32进程...")
+        for proc in _psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                proc_name = proc.info.get('name', '')
+                if proc_name and 'tftpd32' in proc_name.lower():
+                    print(f"[TFTP服务器] 发现tftpd32进程: PID={proc.info['pid']}, 路径={proc.info.get('exe')}")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except _psutil.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                    killed_count += 1
+                    print(f"[TFTP服务器] 已停止进程: PID={proc.info['pid']}")
+            except (_psutil.NoSuchProcess, _psutil.AccessDenied, _psutil.ZombieProcess) as e:
+                print(f"[TFTP服务器] 访问进程失败: {e}")
+                continue
 
         _firmware_tftp_process = None
-        print("[TFTP服务器] 已停止")
-        return {"ok": True, "message": "TFTP服务器已停止"}
+        if killed_count > 0:
+            print(f"[TFTP服务器] 共停止了 {killed_count} 个tftpd32进程")
+            return {"ok": True, "message": f"TFTP服务器已停止，共停止了 {killed_count} 个进程"}
+        else:
+            print("[TFTP服务器] 未找到运行中的tftpd32进程")
+            return {"ok": True, "message": "TFTP服务器未运行"}
     except Exception as e:
         print(f"[TFTP服务器] 停止失败: {e}")
         return {"ok": False, "error": str(e)}
@@ -610,21 +658,13 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
                 "stderr": proc.stderr,
                 "tftp_uri": tftp_uri,
                 "method": "TFTP",
-                "success": proc.returncode == 0
+                "success": proc.returncode == 0,
+                "message": "固件升级请求已触发，TFTP服务器正在运行，请监控升级进度。当升级进度达到60%时，固件上传完成，可以手动停止TFTP服务器。"
             }
 
             self.log_message("固件升级请求完成: 返回码: %d", proc.returncode)
-
-            # 升级请求成功后停止TFTP服务器
-            if proc.returncode == 0:
-                self.log_message("固件升级请求成功，停止TFTP服务器...")
-                stop_result = stop_firmware_tftp_server()
-                result["tftp_stopped"] = stop_result.get("ok", False)
-                result["tftp_stop_message"] = stop_result.get("message", "")
-                if stop_result.get("ok"):
-                    self.log_message("TFTP服务器已停止")
-                else:
-                    self.log_message("TFTP服务器停止失败: %s", stop_result.get("error", "未知错误"))
+            self.log_message("注意: TFTP服务器仍在运行，BMC设备正在通过TFTP下载固件文件")
+            self.log_message("提示: 请监控升级进度，当进度达到60%%时可以手动停止TFTP服务器")
 
             self._send_json(200, result)
         except Exception as e:

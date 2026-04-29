@@ -2,10 +2,11 @@
 """
 BMC固件升级 - 完全自动化工具
 
-使用MCPServer的新工具实现固件升级的完全自动化：
+使用MCPServer的工具实现固件升级的完全自动化：
 1. 从FTP下载固件到PC代理
-2. 上传固件到BMC设备
-3. 监控升级进度
+2. 启动TFTP服务器
+3. 通过Redfish SimpleUpdate接口使用TFTP协议上传固件
+4. 监控升级进度
 
 配置来源：.codebuddy/rules/SystemTest.mdc
 """
@@ -15,9 +16,7 @@ import json
 import time
 import sys
 import os
-
-# 添加MCPServer路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'MCPServer'))
+import re
 
 # MCP服务器配置
 MCP_SERVER = "http://localhost:8000"
@@ -30,9 +29,46 @@ DEVICE_PWD = "Password@_"
 FTP_SERVER = "10.141.228.15"
 FTP_USER = "ftp-CCSPLSmart1"
 FTP_PASSWORD = "X2HWrK"
-FTP_FIRMWARE_PATH = "/data-out/w33199/0427/HDM3_3.05_signed.bin"
-LOCAL_FIRMWARE_DIR = "C:\\firmware_upgrade"
-LOCAL_FIRMWARE_NAME = "HDM3_3.05_signed.bin"
+LOCAL_FIRMWARE_DIR = r"C:\firmware_upgrade"
+
+
+def read_systemtest_config():
+    """从SystemTest.mdc读取固件升级配置"""
+    # 获取项目根目录
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 向上四级到项目根目录
+    project_root = os.path.normpath(os.path.join(current_dir, '..', '..', '..', '..'))
+    config_path = os.path.join(project_root, '.codebuddy', 'rules', 'SystemTest.mdc')
+
+    print(f"当前目录: {current_dir}")
+    print(f"项目根目录: {project_root}")
+    print(f"配置文件路径: {config_path}")
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # 解析固件文件路径
+        firmware_path_match = re.search(r'固件文件路径：([^\n]+)', content)
+        if firmware_path_match:
+            firmware_path = firmware_path_match.group(1).strip()
+            # 从路径中提取文件名
+            filename = os.path.basename(firmware_path)
+            return firmware_path, filename
+        else:
+            print("错误：无法从SystemTest.mdc中解析固件文件路径")
+            return None, None
+    except Exception as e:
+        print(f"错误：读取SystemTest.mdc失败 - {e}")
+        return None, None
+
+
+# 从SystemTest.mdc读取固件配置
+FTP_FIRMWARE_PATH, LOCAL_FIRMWARE_NAME = read_systemtest_config()
+
+if not FTP_FIRMWARE_PATH or not LOCAL_FIRMWARE_NAME:
+    print("错误：无法获取固件配置，请检查SystemTest.mdc文件")
+    sys.exit(1)
 
 
 def get_auth_token(username="admin", password="admin123"):
@@ -53,18 +89,15 @@ def get_auth_token(username="admin", password="admin123"):
         return None
 
 
-def firmware_download(token):
+def firmware_download():
     """下载固件到PC代理"""
-    print("正在调用 firmwareDownload 工具...")
-    api_url = f"{MCP_SERVER}/mcp/firmwareDownload"
+    print("正在调用PC代理下载固件...")
+    api_url = f"http://{PC_IP}:8888/firmware/download"
     payload = {
-        "pcIP": PC_IP,
         "ftpServer": FTP_SERVER,
         "ftpUser": FTP_USER,
         "ftpPassword": FTP_PASSWORD,
         "firmwarePath": FTP_FIRMWARE_PATH,
-        "token": token,
-        "userName": "w33199",
         "localDir": LOCAL_FIRMWARE_DIR,
         "localFilename": LOCAL_FIRMWARE_NAME
     }
@@ -75,44 +108,91 @@ def firmware_download(token):
         print(f"下载结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
         return result
     except Exception as e:
+        print(f"错误：下载固件失败 - {e}")
         return {"error": str(e)}
 
 
-def firmware_upload(local_path, token):
-    """上传固件到BMC"""
-    print(f"正在调用 firmwareUpload 工具，上传 {local_path}...")
-    api_url = f"{MCP_SERVER}/mcp/firmwareUpload"
+def start_tftp_server():
+    """启动TFTP服务器"""
+    print("正在启动TFTP服务器...")
+    api_url = f"http://{PC_IP}:8888/tftp/start"
+    local_firmware_path = os.path.join(LOCAL_FIRMWARE_DIR, LOCAL_FIRMWARE_NAME)
     payload = {
-        "pcIP": PC_IP,
-        "deviceIP": DEVICE_IP,
-        "deviceUser": DEVICE_USER,
-        "DevicePwd": DEVICE_PWD,
-        "localPath": local_path,
-        "token": token,
-        "userName": "w33199",
-        "preserve": "Retain",
-        "rebootMode": "Auto"
+        "localPath": local_firmware_path,
+        "tftpFilename": LOCAL_FIRMWARE_NAME
     }
 
     try:
-        response = requests.post(api_url, json=payload, timeout=300)
+        response = requests.post(api_url, json=payload, timeout=60)
         result = response.json()
-        print(f"上传结果: {json.dumps(result, ensure_ascii=False, indent=2)[:500]}...")
+        print(f"TFTP服务器启动结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
         return result
     except Exception as e:
+        print(f"错误：启动TFTP服务器失败 - {e}")
         return {"error": str(e)}
 
 
-def firmware_status(token):
-    """查询升级状态"""
-    api_url = f"{MCP_SERVER}/mcp/firmwareStatus"
-    payload = {
-        "pcIP": PC_IP,
+def stop_tftp_server():
+    """停止TFTP服务器"""
+    print("正在停止TFTP服务器...")
+    api_url = f"http://{PC_IP}:8888/tftp/stop"
+
+    try:
+        response = requests.post(api_url, timeout=30)
+        result = response.json()
+        print(f"TFTP服务器停止结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
+        return result
+    except Exception as e:
+        print(f"警告：停止TFTP服务器失败 - {e}")
+        return {"error": str(e)}
+
+
+def firmware_upgrade_via_tftp():
+    """通过TFTP协议进行固件升级"""
+    print("正在通过Redfish SimpleUpdate接口发起固件升级...")
+    api_url = f"http://{PC_IP}:8888/redfish"
+    
+    # 构建TFTP URI（使用PC代理的设备网IP）
+    tftp_uri = f"tftp://192.168.33.199/{LOCAL_FIRMWARE_NAME}"
+    
+    # 构建Redfish请求体
+    redfish_body = {
         "deviceIP": DEVICE_IP,
         "deviceUser": DEVICE_USER,
-        "DevicePwd": DEVICE_PWD,
-        "token": token,
-        "userName": "w33199"
+        "devicePwd": DEVICE_PWD,
+        "method": "POST",
+        "url": "/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate",
+        "body": json.dumps({
+            "ImageURI": tftp_uri,
+            "Oem": {
+                "Public": {
+                    "Preserve": "Retain",
+                    "RebootMode": "Auto"
+                }
+            }
+        })
+    }
+
+    try:
+        response = requests.post(api_url, json=redfish_body, timeout=120)
+        result = response.json()
+        print(f"升级请求结果: {json.dumps(result, ensure_ascii=False, indent=2)}")
+        return result
+    except Exception as e:
+        print(f"错误：发起升级请求失败 - {e}")
+        return {"error": str(e)}
+
+
+def firmware_status():
+    """查询升级状态"""
+    api_url = f"http://{PC_IP}:8888/redfish"
+    payload = {
+        "deviceIP": DEVICE_IP,
+        "deviceUser": DEVICE_USER,
+        "devicePwd": DEVICE_PWD,
+        "method": "GET",
+        "url": "/redfish/v1/UpdateService",
+        "body": ""
     }
 
     try:
@@ -126,7 +206,6 @@ def firmware_status(token):
 def parse_upgrade_status(status_json):
     """解析升级状态"""
     try:
-        # 尝试解析Redfish响应
         if isinstance(status_json, dict):
             data = status_json
         else:
@@ -152,60 +231,74 @@ def parse_upgrade_status(status_json):
 def main():
     """主函数 - 完全自动化固件升级流程"""
     print("="*80)
-    print("BMC固件升级 - 完全自动化工具")
+    print("BMC固件升级 - 完全自动化工具 (TFTP协议)")
     print("="*80)
     print(f"\n配置信息:")
     print(f"  PC代理: {PC_IP}")
     print(f"  BMC设备: {DEVICE_IP}")
     print(f"  FTP服务器: {FTP_SERVER}")
     print(f"  固件路径: {FTP_FIRMWARE_PATH}")
-
-    # 步骤0：获取认证token
-    print("\n" + "="*80)
-    print("[步骤0] 获取认证token...")
-    print("="*80)
-    token = get_auth_token()
-    if not token:
-        print("❌ 错误：无法获取认证token")
-        return 1
-
-    print("✅ 认证成功")
+    print(f"  本地文件: {LOCAL_FIRMWARE_NAME}")
 
     # 步骤1：下载固件
     print("\n" + "="*80)
     print("[步骤1] 从FTP下载固件到PC代理")
     print("="*80)
-    result = firmware_download(token)
+    result = firmware_download()
 
     if "error" in result or not result.get("success", False):
-        print("❌ 固件下载失败")
+        print("错误：固件下载失败")
         return 1
 
     local_firmware_path = result.get("local_path", "")
     file_size = result.get("file_size", 0)
-    print(f"✅ 固件下载成功")
-    print(f"   本地路径: {local_firmware_path}")
-    print(f"   文件大小: {file_size} bytes ({file_size/1024/1024:.2f} MB)")
+    print(f"固件下载成功")
+    print(f"  本地路径: {local_firmware_path}")
+    print(f"  文件大小: {file_size} bytes ({file_size/1024/1024:.2f} MB)")
 
     if file_size == 0:
-        print("❌ 错误：下载的文件大小为0")
+        print("错误：下载的文件大小为0")
         return 1
 
-    # 步骤2：上传固件到BMC
+    # 步骤2：启动TFTP服务器
     print("\n" + "="*80)
-    print("[步骤2] 上传固件到BMC（配置保留，自动重启）")
+    print("[步骤2] 启动TFTP服务器")
     print("="*80)
-    result = firmware_upload(local_firmware_path, token)
+    result = start_tftp_server()
 
     if "error" in result or not result.get("success", False):
-        print("❌ 固件上传失败")
+        print("错误：启动TFTP服务器失败")
         return 1
 
-    print("✅ 固件上传成功，升级已启动")
+    print("TFTP服务器启动成功")
+    print(f"  TFTP地址: tftp://192.168.33.199/{LOCAL_FIRMWARE_NAME}")
 
-    # 步骤3：监控升级进度
+    # 步骤3：通过TFTP协议进行固件升级
     print("\n" + "="*80)
-    print("[步骤3] 监控升级进度")
+    print("[步骤3] 通过Redfish SimpleUpdate接口发起固件升级")
+    print("="*80)
+    result = firmware_upgrade_via_tftp()
+
+    if "error" in result:
+        print(f"错误：发起升级请求失败 - {result.get('error')}")
+        # 停止TFTP服务器
+        stop_tftp_server()
+        return 1
+
+    # 检查响应状态码
+    status_code = result.get("status_code", 0)
+    if status_code not in [200, 202]:
+        print(f"错误：升级请求返回错误状态码 {status_code}")
+        print(f"响应: {json.dumps(result, ensure_ascii=False, indent=2)}")
+        # 停止TFTP服务器
+        stop_tftp_server()
+        return 1
+
+    print("固件升级请求已成功发送")
+
+    # 步骤4：监控升级进度
+    print("\n" + "="*80)
+    print("[步骤4] 监控升级进度")
     print("="*80)
     print("升级可能需要较长时间，请耐心等待...\n")
 
@@ -215,7 +308,7 @@ def main():
 
     while elapsed < timeout:
         print(f"[{elapsed}秒] 查询升级状态...")
-        result = firmware_status(token)
+        result = firmware_status()
 
         if "error" not in result:
             status_info = parse_upgrade_status(result)
@@ -235,12 +328,14 @@ def main():
                 if upgrade_state in ["Success", "Failed", None]:
                     print("\n" + "="*80)
                     if upgrade_state == "Success":
-                        print("✅ 固件升级成功！")
+                        print("固件升级成功！")
                     elif upgrade_state == "Failed":
-                        print("❌ 固件升级失败！")
+                        print("固件升级失败！")
                     else:
-                        print("✅ 固件升级完成！")
+                        print("固件升级完成！")
                     print("="*80)
+                    # 停止TFTP服务器
+                    stop_tftp_server()
                     return 0
         else:
             print(f"         警告：查询状态失败 - {result.get('error')}")
@@ -249,8 +344,10 @@ def main():
         elapsed += check_interval
 
     print("\n" + "="*80)
-    print("⚠️  升级超时")
+    print("警告：升级超时")
     print("="*80)
+    # 停止TFTP服务器
+    stop_tftp_server()
     return 1
 
 

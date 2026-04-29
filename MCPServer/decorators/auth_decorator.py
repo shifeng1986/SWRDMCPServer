@@ -124,6 +124,61 @@ def _validate_tool_token(token: str) -> tuple[bool, str, Optional[str]]:
 
 def _authenticate_user(username: str, password: str) -> Optional[str]:
     """验证用户名/密码，成功则返回新生成的 Token"""
+    # 优先尝试LDAP认证
+    from config import LDAP_ENABLED
+    if LDAP_ENABLED:
+        try:
+            from ldap_auth import authenticate_with_ldap
+            is_valid, message = authenticate_with_ldap(username, password)
+            if is_valid:
+                token = _generate_token()
+                _token_cache[token] = {
+                    "user": username,
+                    "expires_at": time.time() + AUTH_TOKEN_EXPIRE_SECONDS,
+                }
+                logger.info(
+                    json.dumps(
+                        {
+                            "timestamp": time.time(),
+                            "event": "user_authenticated",
+                            "user": username,
+                            "auth_type": "ldap",
+                            "action": "login_success",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return token
+            else:
+                logger.warning(
+                    json.dumps(
+                        {
+                            "timestamp": time.time(),
+                            "event": "ldap_authentication_failed",
+                            "user": username,
+                            "reason": message,
+                            "action": "login_failed",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                # LDAP认证失败，继续尝试本地认证
+        except Exception as e:
+            logger.error(
+                json.dumps(
+                    {
+                        "timestamp": time.time(),
+                        "event": "ldap_authentication_error",
+                        "user": username,
+                        "error": str(e),
+                        "action": "login_error",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            # LDAP认证出错，继续尝试本地认证
+
+    # 本地认证（备用）
     if username in AUTH_USERS and AUTH_USERS[username] == password:
         token = _generate_token()
         _token_cache[token] = {
@@ -136,6 +191,7 @@ def _authenticate_user(username: str, password: str) -> Optional[str]:
                     "timestamp": time.time(),
                     "event": "user_authenticated",
                     "user": username,
+                    "auth_type": "local",
                     "action": "login_success",
                 },
                 ensure_ascii=False,
