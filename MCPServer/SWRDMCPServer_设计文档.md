@@ -457,6 +457,10 @@ IPMI - 用户管理			PASS
 获取用户摘要信息	ipmitool user summary	PASS
 ```
 
+#### 2.3.4 FAQ
+
+每次完成MCPServer的重启后，一定要在CodeBuddy的MCP配置界面点击刷新按钮，否则会导致CodeBuddy连接MCP Server异常。
+
 ---
 
 ## 3 测试建议

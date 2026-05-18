@@ -14,6 +14,7 @@
 """
 
 import functools
+import inspect
 import json
 import logging
 import uuid
@@ -122,7 +123,9 @@ def with_operation_log(func: Callable) -> Callable:
             )
 
         # 提取并脱敏参数
-        param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
+        # 使用 inspect.unwrap 穿透装饰器链获取原始函数签名
+        original_func = inspect.unwrap(func)
+        param_names = list(inspect.signature(original_func).parameters.keys())
         all_params = {}
         for i, name in enumerate(param_names):
             if name == "ctx":
@@ -160,9 +163,8 @@ def with_operation_log(func: Callable) -> Callable:
 
         try:
             result = await func(*args, **kwargs)
-            # 结果摘要：截取前 200 字符
-            result_str = str(result)
-            result_summary = result_str[:200] + ("..." if len(result_str) > 200 else "")
+            # 完整记录结果，不截断
+            result_summary = str(result)
             return result
         except Exception as e:
             status = "failed"
@@ -225,9 +227,11 @@ def with_operation_log(func: Callable) -> Callable:
             elif status == "blocked":
                 debug_log_level = debug_logger.error
             
+            # 调试日志中结果只记录长度，避免日志过大
+            result_len = len(result_summary) if result_summary else 0
             debug_log_level(
                 f"[请求完成] tool={tool_name}, user={user}, request_id={request_id}, "
-                f"status={status}, duration_ms={duration_ms}, result={result_summary}"
+                f"status={status}, duration_ms={duration_ms}, result_len={result_len}"
             )
 
     return wrapper

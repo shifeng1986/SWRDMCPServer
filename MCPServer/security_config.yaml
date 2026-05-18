@@ -27,7 +27,7 @@ actions:
   critical: block
   high: confirm
   medium: log
-  low: log
+  low: allow
 
 # MCP 请求体大小限制（单位：字节）
 # 当 tool 的 body 参数超过此大小时，直接拦截并记录操作日志
