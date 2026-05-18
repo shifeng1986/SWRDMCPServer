@@ -457,8 +457,6 @@ IPMI - 用户管理			PASS
 获取用户摘要信息	ipmitool user summary	PASS
 ```
 
-
-
 ---
 
 ## 3 测试建议
