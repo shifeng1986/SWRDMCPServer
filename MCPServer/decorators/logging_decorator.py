@@ -137,20 +137,8 @@ def with_operation_log(func: Callable) -> Callable:
         sanitized_params = _sanitize_parameters(all_params)
 
         # 记录请求开始（操作日志 - 用于审计）
-        operation_logger.info(
-            json.dumps(
-                {
-                    "timestamp": timestamp,
-                    "request_id": request_id,
-                    "tool_name": tool_name,
-                    "user": user,
-                    "auth_source": auth_source,
-                    "event": "request_start",
-                    "parameters": sanitized_params,
-                },
-                ensure_ascii=False,
-            )
-        )
+        # 注意：request_start 日志在 try 块内记录，确保只有真正开始执行的请求才记录
+        # 参数校验失败等前置拦截不会写入操作日志
         
         # 记录调试日志
         debug_logger.debug(
@@ -162,6 +150,22 @@ def with_operation_log(func: Callable) -> Callable:
         result_summary = ""
 
         try:
+            # 在 try 块内记录 request_start，确保只有通过前置校验的请求才写入操作日志
+            operation_logger.info(
+                json.dumps(
+                    {
+                        "timestamp": timestamp,
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "user": user,
+                        "auth_source": auth_source,
+                        "event": "request_start",
+                        "parameters": sanitized_params,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
             result = await func(*args, **kwargs)
             # 完整记录结果，不截断
             result_summary = str(result)
@@ -169,7 +173,16 @@ def with_operation_log(func: Callable) -> Callable:
         except Exception as e:
             status = "failed"
             result_summary = str(e)
-            # 错误日志：记录完整异常堆栈、参数值、用户和上下文（操作日志）
+
+            # 参数校验异常（ValidationError）属于输入校验阶段拦截，不写入操作日志
+            from decorators.validation_decorator import ValidationError
+            if isinstance(e, ValidationError):
+                debug_logger.warning(
+                    f"[参数校验拦截] tool={tool_name}, user={user}, request_id={request_id}, error={str(e)}"
+                )
+                raise
+
+            # 其他异常：记录完整异常堆栈、参数值、用户和上下文（操作日志）
             operation_logger.error(
                 json.dumps(
                     {

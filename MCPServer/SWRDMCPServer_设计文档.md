@@ -76,8 +76,6 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | `browserRun` | 在已打开的浏览器会话中执行操作（点击、填写、导航等） | 低危 | 同上 |
 | `browserScreenshot` | 截取浏览器当前页面截图 | 低危 | 同上 |
 | `browserClose` | 关闭浏览器会话 | 低危 | 同上 |
-| `authenticate` | 用户名/密码认证，获取临时 Token | 无（认证工具） | 无装饰器 |
-| `logout` | 注销 Token | 无（认证工具） | `@with_operation_log` → `@validate_input` |
 
 #### 1.3.2 支持的 PC 代理路由
 
@@ -104,7 +102,7 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 
 | 防护维度 | 规格说明 |
 |----------|----------|
-| 认证方式 | 连接级 Basic Auth + 工具级 Token 验证 |
+| 认证方式 | 连接级 Basic Auth 验证 |
 | Token 有效期 | 可配置（默认 3600 秒） |
 | 风险等级 | 4 级：低危 / 中危 / 高危 / 严重 |
 | 处理策略 | 4 种：allow / log / confirm / block |
@@ -112,8 +110,6 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | 告警渠道 | 邮件 / 钉钉 / 企业微信 / 自定义 Webhook |
 | 操作日志 | 全生命周期记录 + 敏感信息脱敏 + 日志轮转 |
 | 参数校验 | 自动推断校验规则（IP 格式、HTTP 方法、URL 路径等） |
-| 请求体大小限制 | 可配置（默认 10MB） |
-| 确认缓存有效期 | 可配置（默认 300 秒） |
 
 #### 1.3.5 通信规格
 

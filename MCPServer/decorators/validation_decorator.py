@@ -15,8 +15,7 @@ import json
 import re
 from typing import Any, Callable
 
-from .logging_decorator import operation_logger, debug_logger
-from .operation_log_handler import format_timestamp
+from .logging_decorator import debug_logger
 from config import (
     PARAM_VALIDATION_ENABLED,
     PARAM_MAX_LENGTH,
@@ -83,21 +82,6 @@ def _check_string_length(value: str, field_name: str, tool_name: str) -> None:
     max_len = PARAM_MAX_LENGTH.get(field_name, PARAM_MAX_LENGTH.get("default", 1024))
     if len(value) > max_len:
         reason = f"参数长度 {len(value)} 超过限制 {max_len}"
-        operation_logger.warning(
-            json.dumps(
-                {
-                    "timestamp": format_timestamp(),
-                    "event": "parameter_length_exceeded",
-                    "tool_name": tool_name,
-                    "field": field_name,
-                    "value": value,
-                    "length": len(value),
-                    "max_length": max_len,
-                    "action": "blocked",
-                },
-                ensure_ascii=False,
-            )
-        )
         debug_logger.warning(
             f"[参数长度校验失败] tool={tool_name}, field={field_name}, "
             f"length={len(value)}, max={max_len}"
@@ -110,20 +94,6 @@ def _check_blocked_keywords(value: str, field_name: str, tool_name: str) -> None
     for keyword in PARAM_BLOCKED_KEYWORDS:
         if keyword in value:
             reason = f"参数包含敏感关键字: {keyword}"
-            operation_logger.warning(
-                json.dumps(
-                    {
-                        "timestamp": format_timestamp(),
-                        "event": "parameter_blocked_keyword",
-                        "tool_name": tool_name,
-                        "field": field_name,
-                        "value": value,
-                        "matched_keyword": keyword,
-                        "action": "blocked",
-                    },
-                    ensure_ascii=False,
-                )
-            )
             debug_logger.warning(
                 f"[参数关键字校验失败] tool={tool_name}, field={field_name}, "
                 f"matched_keyword={keyword}"
