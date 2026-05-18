@@ -1,7 +1,7 @@
 # MCPServer 告警配置文件样例
 
 # 是否使能告警（全局开关）
-enabled: true
+enabled: false
 
 # 触发告警的最低风险等级（low / medium / high / critical）
 minimum_level: high

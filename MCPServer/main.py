@@ -1,7 +1,8 @@
 """
-Fixed MCP Server for OpenClaw compatibility
-更新：添加非截图操作的文档说明
+SWRDMCPServer - BMC设备管理MCP服务
 """
+
+__version__ = "0.1.0"
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.transport_security import TransportSecuritySettings
@@ -398,5 +399,6 @@ if __name__ == "__main__":
         print(f'[认证]   "headers": {{"Authorization": "Basic YWRtaW46YWRtaW4xMjM="}}')
         print(f"{'='*60}\n")
     
+    print(f"[版本] SWRDMCPServer v{__version__}")
     print("Starting SWRDMCPServer on 0.0.0.0:8000")
     mcp.run(transport="streamable-http")

@@ -13,6 +13,8 @@ Local Proxy 代理转发工具
 5. 将设备的响应原样返回给 MCP Server
 """
 
+__version__ = "0.1.0"
+
 import http.server
 import json
 import subprocess
@@ -782,7 +784,7 @@ def run_proxy_server(host="0.0.0.0", port=8888, cert_file=None, key_file=None):
     context.load_cert_chain(cert_file, key_file)
     httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
-    print(f"Local Proxy 启动: https://{host}:{port}")
+    print(f"Local Proxy v{__version__} 启动: https://{host}:{port}")
     print("模式: 单线程，支持 Redfish/IPMI 转发和浏览器控制")
     print("\n支持的路径:")
     print("  - /redfish: 转发 Redfish 请求到目标设备")
