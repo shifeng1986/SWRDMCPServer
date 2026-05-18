@@ -14,7 +14,9 @@ metadata:
 ### 第一步：根据用例获取对应的命令列表
 1、根据当前需要测试的模块，在"资源引用"中找到对应模块的用例；
 2、根据用例描述，在"资源引用"的命令参考手册中查找到对应的命令；
-3、输出查找结果，等待用户确认当前查找结果是否符合预期；
+3、强制约束：输出查找结果，等待用户确认当前查找结果是否符合预期；确认继续后，则继续执行第二步，否则退出。
+
+输出格式如下：
 
 待测试模式涉及xxx条用例，共计xxx个命令，具体如下：
 | 用例描述 | 命令描述 | 命令字    |  
@@ -22,7 +24,8 @@ metadata:
 | 用户管理 |          |          |
 |         | 获取用户列表|  https：//ip:port/redfish/v1/AccountService/Accounts          |
 |         | 获取指定用户详细信息 | https://ip:port/redfish/v1/AccountService/Accounts/1 |
-请确认是否继续进行测试（y/n），如果确认继续，则继续执行第二步，否则退出。
+请确认继续进行测试（y/n）。
+
 
 ### 第二步：依次执行每条命令，并获取执行结果。
 IPMI：
@@ -44,9 +47,9 @@ Redfish：
 
 
 ##资源引用
-- reference/H3C HDM3 IPMI基础命令参考手册.md - IPMI基础命令参考手册
-- reference/H3C HDM2&HDM3 Redfish参考手册.md - Redfish参考手册
-- reference/module case/UserManager.md - 用户管理用例
+- reference\H3C HDM3 IPMI基础命令参考手册.md - IPMI基础命令参考手册
+- reference\H3C HDM2&HDM3 Redfish参考手册.md - Redfish参考手册
+- reference\module case\user management.md - 用户管理用例
 
 ##质量要求
 1. 对于SWRDMCPServer的调用，userName: str需要传入当前IDE所在系统登录时使用的用户名

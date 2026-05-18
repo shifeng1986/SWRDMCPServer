@@ -10,12 +10,12 @@ confirm_expire_seconds: 300
 # 可选等级：low / medium / high / critical
 risk_level_mapping:
   GET: low
-  POST: high
-  PATCH: high
-  PUT: high
-  DELETE: critical
+  POST: low
+  PATCH: low
+  PUT: low
+  DELETE: low
   # 未匹配的方法默认等级
-  default: medium
+  default: low
 
 # 各风险等级的处理策略
 # 可选策略：
@@ -29,6 +29,52 @@ actions:
   medium: log
   low: log
 
+# MCP 请求体大小限制（单位：字节）
+# 当 tool 的 body 参数超过此大小时，直接拦截并记录操作日志
+max_mcp_body_size: 1024
+
+# 是否启用 MCP 请求体大小检查
+mcp_body_size_check_enabled: true
+
+# ──────────────────────────────────────────────
+# 参数校验配置
+# ──────────────────────────────────────────────
+parameter_validation:
+  # 是否启用参数校验
+  enabled: true
+
+  # 字符串参数最大长度（按参数名配置，不匹配的用 default）
+  max_length:
+    default: 1024
+    body: 1024
+    command: 1024
+    actions: 2000
+    pcIP: 64
+    deviceIP: 64
+    DeviceUser: 64
+    DevicePwd: 64
+    URL: 512
+    sessionId: 128
+    method: 16
+    options: 1024
+
+  # 敏感关键字黑名单（匹配任一即拦截）
+  blocked_keywords:
+    - "#include"
+    - "/etc/passwd"
+    - "/etc/shadow"
+    - "cat /flag"
+    - "cat flag"
+    - "${"
+    - "`"
+    - "$("
+    - "|"
+    - "&&"
+    - "||"
+    - ";"
+    - "../"
+    - "..\\"
+
 # ──────────────────────────────────────────────
 # 用户认证配置
 # ──────────────────────────────────────────────
@@ -37,20 +83,16 @@ actions:
 # 启用后，所有 MCP 请求必须携带有效 Token
 auth:
   enabled: true
+  mode: basic_only
 
-  # 服务端固定 Token（用于 MCP Client 配置）
-  # 若为空，则启动时自动生成随机 Token 并打印到控制台
-  # 建议生产环境设置为固定值，便于 MCP Client 配置
-  token: "swrd-mcp-server-token-2026"
-
-  # 用户名/密码列表（用于 authenticate 工具登录，本地认证备用）
-  # 登录成功后会生成临时 Token，有效期由 token_expire_seconds 控制
-  users:
-    admin: admin123
-    operator: operator123
-  
   # 用户登录 Token 有效期（秒）
   token_expire_seconds: 3600
+
+  # 连接级别认证缓存有效期（秒）
+  cache_ttl: 3600
+
+  # 连接级别认证缓存最大条目数
+  cache_max_size: 1000
 
   # ──────────────────────────────────────────────
   # LDAP认证配置
@@ -73,3 +115,21 @@ auth:
 
     # LDAP用户搜索过滤器
     user_search_filter: "(sAMAccountName=%(user)s)"
+
+    # ──────────────────────────────────────────────
+    # LDAP部门访问控制配置
+    # ──────────────────────────────────────────────
+    # 是否启用基于部门的访问控制
+    department_access_control:
+      enabled: true
+
+      # 允许访问的部门列表（支持多个部门）
+      # 优先检查 department 字段，如果为空则检查 ou 字段
+      allowed_departments:
+        - "平台软件开发部"
+        - "平台软件开发部BMC开发一部"
+        - "平台软件开发部BMC开发二部"
+        - "平台软件开发部BMC开发三部"
+
+      # 是否使用精确匹配（false 表示模糊匹配，包含即可）
+      exact_match: false

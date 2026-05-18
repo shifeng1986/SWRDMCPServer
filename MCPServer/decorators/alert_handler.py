@@ -22,7 +22,8 @@ from email.mime.text import MIMEText
 from typing import Any, Optional
 from urllib.parse import quote
 
-from .logging_decorator import logger
+from .logging_decorator import debug_logger as logger
+from .operation_log_handler import format_timestamp
 from config import (
     ALERT_ENABLED,
     ALERT_MINIMUM_LEVEL,
@@ -248,7 +249,7 @@ def send_alert(
         "reason": reason,
         "user": user,
         "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": format_timestamp(),
     }
 
     # 记录告警日志

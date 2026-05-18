@@ -45,53 +45,116 @@ _LOG_LEVEL_MAP = {
 _yaml_log = _load_yaml_config("config.yaml")
 
 
-def _resolve_log_file(value: str | None) -> str:
+def _resolve_log_file(value: str | None, default_name: str = "mcp_debug.log") -> str:
     """解析日志文件路径，相对路径基于项目根目录"""
     if value is None:
-        return os.path.join(_BASE_DIR, "logs", "mcp_operation.log")
+        return os.path.join(_BASE_DIR, "logs", default_name)
     if os.path.isabs(value):
         return value
     return os.path.join(_BASE_DIR, value)
 
 
-# 日志记录级别
-LOG_LEVEL = _LOG_LEVEL_MAP.get(
-    _yaml_log.get("log_level", "DEBUG").upper(), logging.DEBUG
+# ──────────────────────────────────────────────
+# 调试日志配置（用于开发调试）
+# ──────────────────────────────────────────────
+
+# 调试日志记录级别
+DEBUG_LOG_LEVEL = _LOG_LEVEL_MAP.get(
+    _yaml_log.get("debug_log_level", "DEBUG").upper(), logging.DEBUG
 )
 
-# 日志文件路径
-LOG_FILE = _resolve_log_file(_yaml_log.get("log_file"))
+# 调试日志文件路径
+DEBUG_LOG_FILE = _resolve_log_file(_yaml_log.get("debug_log_file"), "mcp_debug.log")
 
-# 单文件最大字节数（默认 10 MB）
-MAX_BYTES = _yaml_log.get("max_bytes", 10 * 1024 * 1024)
+# 调试日志单文件最大字节数（默认 10 MB）
+DEBUG_MAX_BYTES = _yaml_log.get("debug_max_bytes", 10 * 1024 * 1024)
 
-# 保留的备份文件数量
-BACKUP_COUNT = _yaml_log.get("backup_count", 30)
+# 调试日志保留的备份文件数量
+DEBUG_BACKUP_COUNT = _yaml_log.get("debug_backup_count", 5)
 
-# 日志文件编码
-LOG_ENCODING = _yaml_log.get("log_encoding", "utf-8")
+# 调试日志文件编码
+DEBUG_LOG_ENCODING = _yaml_log.get("debug_log_encoding", "utf-8")
 
-# 控制台日志级别
-CONSOLE_LEVEL = _LOG_LEVEL_MAP.get(
-    _yaml_log.get("console_level", "DEBUG").upper(), logging.DEBUG
+# 调试日志控制台级别
+DEBUG_CONSOLE_LEVEL = _LOG_LEVEL_MAP.get(
+    _yaml_log.get("debug_console_level", "DEBUG").upper(), logging.DEBUG
 )
 
-# 控制台日志格式
-CONSOLE_FORMAT = _yaml_log.get(
-    "console_format", "[%(asctime)s] %(levelname)s %(name)s - %(message)s"
+# 调试日志控制台格式（包含文件名和行号）
+DEBUG_CONSOLE_FORMAT = _yaml_log.get(
+    "debug_console_format", "[%(asctime)s] %(levelname)s [%(filename)s:%(lineno)d] %(name)s - %(message)s"
 )
-CONSOLE_DATE_FORMAT = _yaml_log.get("console_date_format", "%Y-%m-%d %H:%M:%S")
+DEBUG_CONSOLE_DATE_FORMAT = _yaml_log.get("debug_console_date_format", "%Y-%m-%d %H:%M:%S")
 
-# 文件日志级别
-FILE_LEVEL = _LOG_LEVEL_MAP.get(
-    _yaml_log.get("file_level", "DEBUG").upper(), logging.DEBUG
+# 调试日志文件级别
+DEBUG_FILE_LEVEL = _LOG_LEVEL_MAP.get(
+    _yaml_log.get("debug_file_level", "DEBUG").upper(), logging.DEBUG
 )
 
-# 文件日志格式
-FILE_FORMAT = _yaml_log.get(
-    "file_format", "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+# 调试日志文件格式（包含文件名和行号）
+DEBUG_FILE_FORMAT = _yaml_log.get(
+    "debug_file_format", "%(asctime)s | %(levelname)s | [%(filename)s:%(lineno)d] | %(name)s | %(message)s"
 )
-FILE_DATE_FORMAT = _yaml_log.get("file_date_format", "%Y-%m-%d:%H:%M:%S")
+DEBUG_FILE_DATE_FORMAT = _yaml_log.get("debug_file_date_format", "%Y-%m-%d:%H:%M:%S")
+
+
+# ──────────────────────────────────────────────
+# 操作日志配置（用于审计，保留三个月）
+# ──────────────────────────────────────────────
+
+# 操作日志记录级别（建议使用 INFO）
+OPERATION_LOG_LEVEL = _LOG_LEVEL_MAP.get(
+    _yaml_log.get("operation_log_level", "INFO").upper(), logging.INFO
+)
+
+# 操作日志基础目录（按周分文件夹）
+OPERATION_LOG_DIR = os.path.join(_BASE_DIR, "logs", "operation")
+
+# 操作日志文件编码
+OPERATION_LOG_ENCODING = _yaml_log.get("operation_log_encoding", "utf-8")
+
+# 操作日志保留天数（默认 90 天，约三个月）
+OPERATION_LOG_RETENTION_DAYS = _yaml_log.get("operation_log_retention_days", 90)
+
+# 操作日志文件格式（JSON 格式，便于审计）
+OPERATION_FILE_FORMAT = _yaml_log.get(
+    "operation_file_format", "%(message)s"
+)
+OPERATION_FILE_DATE_FORMAT = _yaml_log.get("operation_file_date_format", "%Y-%m-%d:%H:%M:%S")
+
+
+# ──────────────────────────────────────────────
+# 兼容旧版本配置（已废弃，建议使用上面的新配置）
+# ──────────────────────────────────────────────
+
+# 日志记录级别（已废弃，使用 DEBUG_LOG_LEVEL 和 OPERATION_LOG_LEVEL）
+LOG_LEVEL = DEBUG_LOG_LEVEL
+
+# 日志文件路径（已废弃，使用 DEBUG_LOG_FILE）
+LOG_FILE = DEBUG_LOG_FILE
+
+# 单文件最大字节数（已废弃，使用 DEBUG_MAX_BYTES）
+MAX_BYTES = DEBUG_MAX_BYTES
+
+# 保留的备份文件数量（已废弃，使用 DEBUG_BACKUP_COUNT）
+BACKUP_COUNT = DEBUG_BACKUP_COUNT
+
+# 日志文件编码（已废弃，使用 DEBUG_LOG_ENCODING）
+LOG_ENCODING = DEBUG_LOG_ENCODING
+
+# 控制台日志级别（已废弃，使用 DEBUG_CONSOLE_LEVEL）
+CONSOLE_LEVEL = DEBUG_CONSOLE_LEVEL
+
+# 控制台日志格式（已废弃，使用 DEBUG_CONSOLE_FORMAT）
+CONSOLE_FORMAT = DEBUG_CONSOLE_FORMAT
+CONSOLE_DATE_FORMAT = DEBUG_CONSOLE_DATE_FORMAT
+
+# 文件日志级别（已废弃，使用 DEBUG_FILE_LEVEL）
+FILE_LEVEL = DEBUG_FILE_LEVEL
+
+# 文件日志格式（已废弃，使用 DEBUG_FILE_FORMAT）
+FILE_FORMAT = DEBUG_FILE_FORMAT
+FILE_DATE_FORMAT = DEBUG_FILE_DATE_FORMAT
 
 
 # ──────────────────────────────────────────────
@@ -158,6 +221,33 @@ ALERT_CHANNELS = _yaml_alert.get("channels", {})
 
 
 # ──────────────────────────────────────────────
+# MCP 请求体大小限制配置
+# ──────────────────────────────────────────────
+
+# MCP 请求体最大字节数（默认 1KB = 1024 字节）
+MAX_MCP_BODY_SIZE = _yaml_sec.get("max_mcp_body_size", 1024)
+
+# 是否启用 MCP 请求体大小检查
+MCP_BODY_SIZE_CHECK_ENABLED = _yaml_sec.get("mcp_body_size_check_enabled", True)
+
+
+# ──────────────────────────────────────────────
+# 参数校验配置
+# ──────────────────────────────────────────────
+
+_yaml_param = _yaml_sec.get("parameter_validation", {})
+
+# 是否启用参数校验
+PARAM_VALIDATION_ENABLED = _yaml_param.get("enabled", True)
+
+# 字符串参数最大长度配置
+PARAM_MAX_LENGTH = _yaml_param.get("max_length", {"default": 1024})
+
+# 敏感关键字黑名单
+PARAM_BLOCKED_KEYWORDS = _yaml_param.get("blocked_keywords", [])
+
+
+# ──────────────────────────────────────────────
 # 用户认证配置
 # ──────────────────────────────────────────────
 
@@ -166,14 +256,14 @@ _yaml_auth = _yaml_sec.get("auth", {})
 # 是否启用用户认证
 AUTH_ENABLED = _yaml_auth.get("enabled", False)
 
-# 服务端固定 Token（为空则自动生成）
-AUTH_TOKEN = _yaml_auth.get("token", "")
-
 # 用户名/密码列表（本地认证备用）
 AUTH_USERS = _yaml_auth.get("users", {})
 
-# 用户登录 Token 有效期（秒）
-AUTH_TOKEN_EXPIRE_SECONDS = _yaml_auth.get("token_expire_seconds", 3600)
+# 认证缓存有效期（秒）
+AUTH_CACHE_TTL = _yaml_auth.get("cache_ttl", 3600)
+
+# 认证缓存最大条目数
+AUTH_CACHE_MAX_SIZE = _yaml_auth.get("cache_max_size", 1000)
 
 
 # ──────────────────────────────────────────────
@@ -199,3 +289,20 @@ LDAP_USER_SEARCH_BASE = _yaml_ldap.get("user_search_base", "")
 
 # LDAP用户搜索过滤器
 LDAP_USER_SEARCH_FILTER = _yaml_ldap.get("user_search_filter", "(sAMAccountName=%(user)s)")
+
+
+# ──────────────────────────────────────────────
+# LDAP部门访问控制配置
+# ──────────────────────────────────────────────
+
+_yaml_ldap_dept = _yaml_ldap.get("department_access_control", {})
+
+# 是否启用LDAP部门访问控制
+LDAP_DEPT_ACCESS_CONTROL_ENABLED = _yaml_ldap_dept.get("enabled", False)
+
+# 允许访问的部门列表
+LDAP_ALLOWED_DEPARTMENTS = _yaml_ldap_dept.get("allowed_departments", [])
+
+# 是否使用精确匹配
+LDAP_DEPT_EXACT_MATCH = _yaml_ldap_dept.get("exact_match", False)
+

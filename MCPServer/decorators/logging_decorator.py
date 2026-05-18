@@ -6,88 +6,31 @@
 - 输入参数（敏感信息脱敏）、操作结果摘要
 - 执行耗时、状态、请求唯一标识
 
-日志输出到文件和控制台两个通道，配置项由 config.py 统一管理。
+日志分类：
+- 操作日志：记录每个 tool 调用的完整信息，用于审计，保留三个月
+- 调试日志：记录调试信息，用于开发排查问题
+
+操作日志输出到文件（按天生成，按周归档），调试日志输出到文件和控制台。
 """
 
 import functools
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
-from logging.handlers import RotatingFileHandler
 
-from config import (
-    LOG_LEVEL,
-    LOG_FILE,
-    MAX_BYTES,
-    BACKUP_COUNT,
-    LOG_ENCODING,
-    CONSOLE_FORMAT,
-    CONSOLE_DATE_FORMAT,
-    FILE_FORMAT,
-    FILE_DATE_FORMAT,
-    CONSOLE_LEVEL,
-    FILE_LEVEL,
-)
-
-
-# 敏感参数关键词列表
-SENSITIVE_KEYWORDS = [
-    "password", "pwd", "secret", "token", "apikey", "api_key",
-    "auth", "credential", "private_key", "access_key",
-]
-
-# 脱敏后的占位符
-SENSITIVE_MASK = "******"
+from .operation_log_handler import setup_operation_logger, setup_debug_logger
 
 
 def _sanitize_parameters(params: dict) -> dict:
-    """对敏感参数进行脱敏处理"""
-    sanitized = {}
-    for key, value in params.items():
-        key_lower = key.lower()
-        if any(keyword in key_lower for keyword in SENSITIVE_KEYWORDS):
-            sanitized[key] = SENSITIVE_MASK
-        else:
-            sanitized[key] = value
-    return sanitized
+    """返回原始参数，不做脱敏处理（完整记录用于审计）"""
+    return params
 
 
-def _setup_logger() -> logging.Logger:
-    """设置日志记录器，同时输出到控制台和文件，配置项由 config.py 统一管理"""
-    logger = logging.getLogger("mcp_operation")
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(LOG_LEVEL)
-
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(CONSOLE_LEVEL)
-    console_fmt = logging.Formatter(CONSOLE_FORMAT, datefmt=CONSOLE_DATE_FORMAT)
-    console_handler.setFormatter(console_fmt)
-    logger.addHandler(console_handler)
-
-    # 文件处理器 - 按大小轮转
-    log_dir = os.path.dirname(LOG_FILE)
-    os.makedirs(log_dir, exist_ok=True)
-    file_handler = RotatingFileHandler(
-        LOG_FILE,
-        maxBytes=MAX_BYTES,
-        backupCount=BACKUP_COUNT,
-        encoding=LOG_ENCODING,
-    )
-    file_handler.setLevel(FILE_LEVEL)
-    file_fmt = logging.Formatter(FILE_FORMAT, datefmt=FILE_DATE_FORMAT)
-    file_handler.setFormatter(file_fmt)
-    logger.addHandler(file_handler)
-
-    return logger
-
-
-logger = _setup_logger()
+# 初始化日志记录器
+operation_logger = setup_operation_logger()
+debug_logger = setup_debug_logger()
 
 
 def with_operation_log(func: Callable) -> Callable:
@@ -103,6 +46,10 @@ def with_operation_log(func: Callable) -> Callable:
     - duration_ms：执行耗时（毫秒）
     - status：执行状态（success/failed/blocked）
     - request_id：请求唯一标识（用于链路追踪）
+    
+    日志分类：
+    - 操作日志：记录到 operation_logger，用于审计
+    - 调试日志：记录到 debug_logger，用于开发调试
     """
 
     @functools.wraps(func)
@@ -111,16 +58,68 @@ def with_operation_log(func: Callable) -> Callable:
         tool_name = func.__name__
         timestamp = datetime.now(timezone.utc).isoformat()
 
-        # 提取用户标识：优先从 userName 参数获取，其次从 Context 中获取
+        # 提取用户标识：优先从中间件认证获取，其次从 Context 中获取
         user = "unknown"
-        # 优先从 userName 参数获取
-        userName = kwargs.get("userName", "")
-        if userName:
-            user = userName
-        else:
-            ctx = kwargs.get("ctx") or (args[-1] if args else None)
-            if ctx and hasattr(ctx, "client_id"):
+        auth_source = "none"  # 记录用户信息来源
+        
+        # 1. 尝试从中间件认证获取用户信息（basic_only模式）
+        ctx = kwargs.get("ctx") or (args[-1] if args else None)
+        if ctx:
+            try:
+                # 尝试从 request.state 中获取中间件认证的用户信息
+                if hasattr(ctx, "request_context") and ctx.request_context:
+                    request = getattr(ctx.request_context, "request", None)
+                    if request and hasattr(request, "state"):
+                        authenticated_user = getattr(request.state, "authenticated_user", None)
+                        if authenticated_user:
+                            user = authenticated_user
+                            auth_source = "middleware"
+            except Exception:
+                pass  # 忽略异常，使用备用方案
+        
+        # 2. 如果没有中间件认证信息，从 userName 参数获取（兼容旧版）
+        if user == "unknown":
+            userName = kwargs.get("userName", "")
+            if userName:
+                user = userName
+                auth_source = "parameter"
+        
+        # 3. 如果仍然没有，从 Context 的 client_id 获取
+        if user == "unknown" and ctx:
+            if hasattr(ctx, "client_id"):
                 user = ctx.client_id or "unknown"
+                auth_source = "context"
+        
+        # 安全检查：如果无法获取用户信息，拒绝执行并记录安全日志
+        if user == "unknown" or not user:
+            # 记录安全警告日志（操作日志）
+            operation_logger.warning(
+                json.dumps(
+                    {
+                        "timestamp": timestamp,
+                        "request_id": request_id,
+                        "tool_name": tool_name,
+                        "user": "unknown",
+                        "event": "security_violation",
+                        "reason": "无法获取用户信息，拒绝执行tool",
+                        "auth_source": auth_source,
+                        "suggestion": "请检查中间件认证是否正常工作",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            # 记录调试日志
+            debug_logger.warning(
+                f"[安全违规] 用户信息缺失 - tool={tool_name}, request_id={request_id}, auth_source={auth_source}"
+            )
+            return json.dumps(
+                {
+                    "error": "认证失败",
+                    "message": "无法获取用户信息，请确保已通过中间件认证",
+                    "security": "user_identification_required"
+                },
+                ensure_ascii=False,
+            )
 
         # 提取并脱敏参数
         param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
@@ -134,19 +133,25 @@ def with_operation_log(func: Callable) -> Callable:
                 all_params[name] = kwargs[name]
         sanitized_params = _sanitize_parameters(all_params)
 
-        # 记录请求开始
-        logger.info(
+        # 记录请求开始（操作日志 - 用于审计）
+        operation_logger.info(
             json.dumps(
                 {
                     "timestamp": timestamp,
                     "request_id": request_id,
                     "tool_name": tool_name,
                     "user": user,
+                    "auth_source": auth_source,
                     "event": "request_start",
                     "parameters": sanitized_params,
                 },
                 ensure_ascii=False,
             )
+        )
+        
+        # 记录调试日志
+        debug_logger.debug(
+            f"[请求开始] tool={tool_name}, user={user}, request_id={request_id}, params={sanitized_params}"
         )
 
         start_time = datetime.now(timezone.utc)
@@ -162,8 +167,8 @@ def with_operation_log(func: Callable) -> Callable:
         except Exception as e:
             status = "failed"
             result_summary = str(e)
-            # 错误日志：记录完整异常堆栈、参数值、用户和上下文
-            logger.error(
+            # 错误日志：记录完整异常堆栈、参数值、用户和上下文（操作日志）
+            operation_logger.error(
                 json.dumps(
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -180,12 +185,17 @@ def with_operation_log(func: Callable) -> Callable:
                 ),
                 exc_info=True,
             )
+            # 记录调试日志
+            debug_logger.error(
+                f"[请求错误] tool={tool_name}, user={user}, request_id={request_id}, error={str(e)}",
+                exc_info=True
+            )
             raise
         finally:
             end_time = datetime.now(timezone.utc)
             duration_ms = int((end_time - start_time).total_seconds() * 1000)
 
-            # 记录请求完成
+            # 记录请求完成（操作日志 - 用于审计）
             log_entry = {
                 "timestamp": end_time.isoformat(),
                 "request_id": request_id,
@@ -196,14 +206,31 @@ def with_operation_log(func: Callable) -> Callable:
                 "status": status,
                 "result": result_summary,
             }
+            operation_log_level = operation_logger.info
             if status == "success":
-                logger.info(json.dumps(log_entry, ensure_ascii=False))
+                operation_log_level = operation_logger.info
             elif status == "failed":
-                logger.warning(json.dumps(log_entry, ensure_ascii=False))
+                operation_log_level = operation_logger.warning
             elif status == "blocked":
-                logger.critical(json.dumps(log_entry, ensure_ascii=False))
+                operation_log_level = operation_logger.critical
+            
+            operation_log_level(json.dumps(log_entry, ensure_ascii=False))
+            
+            # 记录调试日志
+            debug_log_level = debug_logger.debug
+            if status == "success":
+                debug_log_level = debug_logger.debug
+            elif status == "failed":
+                debug_log_level = debug_logger.warning
+            elif status == "blocked":
+                debug_log_level = debug_logger.error
+            
+            debug_log_level(
+                f"[请求完成] tool={tool_name}, user={user}, request_id={request_id}, "
+                f"status={status}, duration_ms={duration_ms}, result={result_summary}"
+            )
 
     return wrapper
 
 
-__all__ = ["with_operation_log", "logger"]
+__all__ = ["with_operation_log", "operation_logger", "debug_logger"]

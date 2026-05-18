@@ -6,11 +6,22 @@
 - 参数类型检查
 - 参数格式校验（IP 地址、URL 等）
 - 参数值范围校验
+- 字符串长度校验
+- 内容关键字黑名单校验
 """
 
 import functools
+import json
 import re
 from typing import Any, Callable
+
+from .logging_decorator import operation_logger, debug_logger
+from .operation_log_handler import format_timestamp
+from config import (
+    PARAM_VALIDATION_ENABLED,
+    PARAM_MAX_LENGTH,
+    PARAM_BLOCKED_KEYWORDS,
+)
 
 
 class ValidationError(Exception):
@@ -67,6 +78,59 @@ def _validate_not_empty(value: str, field_name: str) -> None:
         raise ValidationError(field_name, "不能为空")
 
 
+def _check_string_length(value: str, field_name: str, tool_name: str) -> None:
+    """校验字符串长度"""
+    max_len = PARAM_MAX_LENGTH.get(field_name, PARAM_MAX_LENGTH.get("default", 1024))
+    if len(value) > max_len:
+        reason = f"参数长度 {len(value)} 超过限制 {max_len}"
+        operation_logger.warning(
+            json.dumps(
+                {
+                    "timestamp": format_timestamp(),
+                    "event": "parameter_length_exceeded",
+                    "tool_name": tool_name,
+                    "field": field_name,
+                    "value": value,
+                    "length": len(value),
+                    "max_length": max_len,
+                    "action": "blocked",
+                },
+                ensure_ascii=False,
+            )
+        )
+        debug_logger.warning(
+            f"[参数长度校验失败] tool={tool_name}, field={field_name}, "
+            f"length={len(value)}, max={max_len}"
+        )
+        raise ValidationError(field_name, reason)
+
+
+def _check_blocked_keywords(value: str, field_name: str, tool_name: str) -> None:
+    """校验是否包含敏感关键字"""
+    for keyword in PARAM_BLOCKED_KEYWORDS:
+        if keyword in value:
+            reason = f"参数包含敏感关键字: {keyword}"
+            operation_logger.warning(
+                json.dumps(
+                    {
+                        "timestamp": format_timestamp(),
+                        "event": "parameter_blocked_keyword",
+                        "tool_name": tool_name,
+                        "field": field_name,
+                        "value": value,
+                        "matched_keyword": keyword,
+                        "action": "blocked",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            debug_logger.warning(
+                f"[参数关键字校验失败] tool={tool_name}, field={field_name}, "
+                f"matched_keyword={keyword}"
+            )
+            raise ValidationError(field_name, reason)
+
+
 def validate_input(func: Callable) -> Callable:
     """
     输入参数校验装饰器
@@ -77,10 +141,15 @@ def validate_input(func: Callable) -> Callable:
     - 名为 "URL" 的参数：校验 URL 路径格式
     - 名为 "User" 或包含 "user" 的参数：校验非空
     - 名为 "body" 的参数：允许为空（GET 请求）
+
+    对所有字符串参数额外执行：
+    - 长度校验（超过配置的最大长度则拦截）
+    - 关键字黑名单校验（包含敏感关键字则拦截）
     """
 
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
+        tool_name = func.__name__
         param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
         all_params = {}
         for i, name in enumerate(param_names):
@@ -114,6 +183,14 @@ def validate_input(func: Callable) -> Callable:
             # 密码校验（仅非空，不校验格式）
             if "pwd" in name_lower or "password" in name_lower:
                 _validate_not_empty(str(value), name)
+
+        # 字符串长度校验 + 关键字黑名单校验（对所有字符串参数）
+        if PARAM_VALIDATION_ENABLED:
+            for name, value in all_params.items():
+                if not isinstance(value, str):
+                    continue
+                _check_string_length(value, name, tool_name)
+                _check_blocked_keywords(value, name, tool_name)
 
         return await func(*args, **kwargs)
 

@@ -9,11 +9,14 @@ import requests
 import json
 import socket
 import psutil
+import urllib3
 from decorators import with_high_risk_check, with_operation_log, validate_input, auth_required
 from decorators.security_decorator import SecurityCheckError, ConfirmationRequired
-from decorators.auth_decorator import AuthMiddleware, get_server_token, _authenticate_user, _revoke_token, token_endpoint
 from config import AUTH_ENABLED
+from connection_auth import ConnectionAuthMiddleware
 
+# 抑制自签名证书的 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def get_local_ipv4s():
     ips = set()
@@ -24,8 +27,8 @@ def get_local_ipv4s():
     return ips
 
 ips = get_local_ipv4s()
-allowed_hosts = ["localhost:*", "127.0.0.1:*"] + [f"{ip}:*" for ip in ips]
-allowed_origins = ["http://localhost:*", "http://127.0.0.1:*"] + [f"http://{ip}:*" for ip in ips]
+allowed_hosts = ["localhost:*", "127.0.0.1:*", "10.*:*"] + [f"{ip}:*" for ip in ips]
+allowed_origins = ["http://localhost:*", "http://127.0.0.1:*", "http://10.*:*"] + [f"http://{ip}:*" for ip in ips]
 
 ts = TransportSecuritySettings(
     allowed_hosts=allowed_hosts,
@@ -40,11 +43,12 @@ mcp = FastMCP(
 )
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendRedfish(
+    ctx: Context,
     pcIP: str,
     deviceIP: str,
     deviceUser: str,
@@ -52,13 +56,11 @@ async def sendRedfish(
     method: str,
     URL: str,
     body: str,
-    token: str,
-    ctx: Context,
-    userName: str = "",
 ) -> str:
     """发送Redfish请求，通过指定PC代理访问目标设备的Redfish API
-    
+
     Args:
+        ctx: MCP上下文（用户信息从连接级别认证中获取）
         pcIP: PC代理的IP地址
         deviceIP: 目标设备的IP地址
         deviceUser: 设备登录用户名
@@ -66,29 +68,21 @@ async def sendRedfish(
         method: HTTP方法（GET/POST/PUT/PATCH/DELETE）
         URL: Redfish路径（如 /redfish/v1）
         body: 请求体（GET请求传空字符串）
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        userName: IDE运行系统的登录用户名，由IDE侧传入
     """
 
-    # 打印用户信息
-    user_display = userName if userName else "unknown"
-    print(f"[用户信息] IDE用户: {user_display}")
-
-    # 打印远端 MCP Client 信息
-    client_info = {
-        "client_id": ctx.client_id,
-        "request_id": ctx.request_id,
-    }
-    if ctx.session and ctx.session.client_params:
-        params = ctx.session.client_params
-        client_info["client_name"] = params.clientInfo.name
-        client_info["client_version"] = params.clientInfo.version
-        client_info["protocol_version"] = params.protocolVersion
-    print(f"[MCP Client 信息] {json.dumps(client_info, ensure_ascii=False, indent=2)}")
+    # 打印用户信息（从连接级别认证中获取）
+    username = "unknown"
+    try:
+        if hasattr(ctx, "request_context") and ctx.request_context:
+            request = getattr(ctx.request_context, "request", None)
+            if request and hasattr(request, "state"):
+                username = getattr(request.state, "authenticated_user", "unknown")
+    except Exception:
+        pass
+    print(f"[用户信息] 认证用户: {username}")
 
     try:
-        proxy_url = f"http://{pcIP}:8888/redfish"
+        proxy_url = f"https://{pcIP}:8888/redfish"
         payload = {
             "deviceIP": deviceIP,
             "deviceUser": deviceUser,
@@ -102,6 +96,7 @@ async def sendRedfish(
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30,
+            verify=False,
         )
         return response.text
     except requests.exceptions.RequestException as e:
@@ -111,50 +106,41 @@ async def sendRedfish(
 
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendIPMI(
+    ctx: Context,
     pcIP: str,
     deviceIP: str,
     deviceUser: str,
     DevicePwd: str,
     command: str,
-    token: str,
-    ctx: Context,
-    userName: str = "",
 ) -> str:
     """发送IPMI命令，通过指定PC代理执行ipmitool命令
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         deviceIP: 目标设备的IP地址
         deviceUser: 设备登录用户名
         DevicePwd: 设备登录密码
         command: ipmitool命令（如 "mc info", "sensor list", "power status"）
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        userName: IDE运行系统的登录用户名，由IDE侧传入
     """
-    # 打印用户信息
-    user_display = userName if userName else "unknown"
-    print(f"[用户信息] IDE用户: {user_display}")
-
-    # 打印远端 MCP Client 信息
-    client_info = {
-        "client_id": ctx.client_id,
-        "request_id": ctx.request_id,
-    }
-    if ctx.session and ctx.session.client_params:
-        params = ctx.session.client_params
-        client_info["client_name"] = params.clientInfo.name
-        client_info["client_version"] = params.clientInfo.version
-        client_info["protocol_version"] = params.protocolVersion
-    print(f"[MCP Client 信息] {json.dumps(client_info, ensure_ascii=False, indent=2)}")
+    # 打印用户信息（从连接级别认证中获取）
+    username = "unknown"
+    try:
+        if hasattr(ctx, "request_context") and ctx.request_context:
+            request = getattr(ctx.request_context, "request", None)
+            if request and hasattr(request, "state"):
+                username = getattr(request.state, "authenticated_user", "unknown")
+    except Exception:
+        pass
+    print(f"[用户信息] 认证用户: {username}")
 
     try:
-        proxy_url = f"http://{pcIP}:8888/ipmi"
+        proxy_url = f"https://{pcIP}:8888/ipmi"
         payload = {
             "deviceIP": deviceIP,
             "deviceUser": deviceUser,
@@ -166,6 +152,7 @@ async def sendIPMI(
             json=payload,
             headers={"Content-Type": "application/json"},
             timeout=30,
+            verify=False,
         )
         return response.text
     except requests.exceptions.RequestException as e:
@@ -175,7 +162,7 @@ async def sendIPMI(
 
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
@@ -183,8 +170,6 @@ async def browserOpen(
     pcIP: str,
     sessionId: str,
     headless: bool,
-    token: str,
-    userName: str = "",
 ) -> str:
     """在PC代理上打开浏览器
 
@@ -192,24 +177,23 @@ async def browserOpen(
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         headless: 是否无头模式
-        token: 认证Token（通过 authenticate 工具获取）
-        userName: IDE运行系统的登录用户名，由IDE侧传入
+        ctx: MCP上下文
     """
     try:
-        proxy_url = f"http://{pcIP}:8888/browser/open"
+        proxy_url = f"https://{pcIP}:8888/browser/open"
         payload = {
             "sessionId": sessionId,
             "headless": headless,
             "browser": "chromium"
         }
-        response = requests.post(proxy_url, json=payload, timeout=60)
+        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
@@ -217,17 +201,15 @@ async def browserRun(
     pcIP: str,
     sessionId: str,
     actions: str,
-    token: str,
-    userName: str = "",
     options: str = "",
 ) -> str:
     """
     在已打开的浏览器会话中执行操作
-    
+
     支持的操作类型（actions参数为JSON数组）：
     - {"type":"goto","url":"http://..."} - 导航到URL
     - {"type":"click","selector":"#btn"} - 点击元素
-    - {"type":"fill","selector":"#input","text":"value"} - 塅写输入框
+    - {"type":"fill","selector":"#input","text":"value"} - 填写输入框
     - {"type":"press","selector":"#input","key":"Enter"} - 按键
     - {"type":"wait_for_selector","selector":"#elem"} - 等待元素出现
     - {"type":"wait_for_load_state","state":"networkidle"} - 等待页面加载
@@ -240,34 +222,32 @@ async def browserRun(
     - {"type":"get_all_buttons"} - 获取所有按钮（非截图）
     - {"type":"get_page_info"} - 获取页面信息（非截图）
     - {"type":"query_selector_all","selector":"li"} - 查询多个元素（非截图）
-    
+
     示例actions参数：
     '[{"type":"goto","url":"http://192.168.49.71"},{"type":"get_page_info"}]'
-    
+
     Args:
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         actions: 操作JSON数组
-        token: 认证Token（通过 authenticate 工具获取）
-        userName: IDE运行系统的登录用户名，由IDE侧传入
         options: 可选配置JSON
     """
     try:
-        proxy_url = f"http://{pcIP}:8888/browser/run"
+        proxy_url = f"https://{pcIP}:8888/browser/run"
         payload = {
             "sessionId": sessionId,
             "actions": json.loads(actions)
         }
         if options:
             payload["options"] = json.loads(options)
-        response = requests.post(proxy_url, json=payload, timeout=120)
+        response = requests.post(proxy_url, json=payload, timeout=120, verify=False)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
@@ -275,8 +255,6 @@ async def browserScreenshot(
     pcIP: str,
     sessionId: str,
     fullPage: bool,
-    token: str,
-    userName: str = "",
 ) -> str:
     """截取浏览器当前页面的截图（注意：可能超时，建议使用get_page_info等替代）
 
@@ -284,333 +262,141 @@ async def browserScreenshot(
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         fullPage: 是否全页截图
-        token: 认证Token（通过 authenticate 工具获取）
-        userName: IDE运行系统的登录用户名，由IDE侧传入
+        ctx: MCP上下文
     """
     try:
-        proxy_url = f"http://{pcIP}:8888/browser/screenshot"
+        proxy_url = f"https://{pcIP}:8888/browser/screenshot"
         payload = {
             "sessionId": sessionId,
             "fullPage": fullPage
         }
-        response = requests.post(proxy_url, json=payload, timeout=60)
+        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
 @mcp.tool()
-@auth_required              # Token 认证检查（最外层）
+@auth_required              # 统一认证检查
+@with_high_risk_check      # 高危操作检查（含高危命令拦截）
+@with_operation_log        # 操作日志记录
+@validate_input            # 输入参数校验
+async def sendCommand(
+    pcIP: str,
+    commandType: str,
+    params: str,
+) -> str:
+    """在PC代理上执行本地命令
+
+    支持的命令类型：
+    - ftp_download: 从FTP服务器下载文件到PC代理
+    - serial: 连接设备串口（通过串口交换机）
+    - ssh: SSH连接到设备并执行命令
+    - tftp_server: 启动/停止TFTP服务器
+    - shell: 在PC代理上执行shell命令
+
+    Args:
+        pcIP: PC代理的IP地址
+        commandType: 命令类型（ftp_download/serial/ssh/tftp_server/shell）
+        params: JSON字符串，包含该命令类型所需的参数
+
+    ftp_download params 示例:
+        {"ftpServer":"10.141.228.15","ftpUser":"user","ftpPassword":"pass",
+         "remotePath":"/path/firmware.bin","localPath":"C:\\firmware\\firmware.bin"}
+
+    serial params 示例:
+        {"host":"192.168.0.200","port":3004,"baud":115200,"action":"open"}
+
+    ssh params 示例:
+        {"host":"192.168.88.222","port":22,"user":"admin","password":"pass",
+         "command":"mc info","timeout":30}
+
+    tftp_server params 示例:
+        {"action":"start","port":69,"dir":"C:\\firmware_upgrade"}
+
+    shell params 示例:
+        {"command":"dir /b C:\\firmware","timeout":30}
+    """
+    try:
+        proxy_url = f"https://{pcIP}:8888/command"
+        payload = {
+            "commandType": commandType,
+            "params": params,
+        }
+        response = requests.post(
+            proxy_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=120,
+            verify=False,
+        )
+        return response.text
+    except requests.exceptions.RequestException as e:
+        return json.dumps({"error": f"Command request failed: {str(e)}"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": f"Unexpected error: {str(e)}"}, ensure_ascii=False)
+
+
+@mcp.tool()
+@auth_required              # 统一认证检查
 @with_high_risk_check      # 高危操作检查
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserClose(
     pcIP: str,
     sessionId: str,
-    token: str,
-    userName: str = "",
 ) -> str:
     """关闭浏览器会话
 
     Args:
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
-        token: 认证Token（通过 authenticate 工具获取）
-        userName: IDE运行系统的登录用户名，由IDE侧传入
     """
     try:
-        proxy_url = f"http://{pcIP}:8888/browser/close"
+        proxy_url = f"https://{pcIP}:8888/browser/close"
         payload = {"sessionId": sessionId}
-        response = requests.post(proxy_url, json=payload, timeout=60)
+        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-@mcp.tool()
-async def authenticate(
-    username: str,
-    password: str,
-    ctx: Context,
-) -> str:
-    """用户认证，通过用户名和密码获取访问 Token
-
-    Args:
-        username: 用户名
-        password: 密码
-        ctx: MCP上下文
-    """
-    token = _authenticate_user(username, password)
-    if token:
-        return json.dumps(
-            {
-                "status": "success",
-                "message": "认证成功",
-                "token": token,
-                "token_type": "Bearer",
-                "expires_in": 3600,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    else:
-        return json.dumps(
-            {
-                "status": "error",
-                "message": "认证失败：用户名或密码错误",
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-@mcp.tool()
-async def logout(
-    token: str,
-    ctx: Context,
-) -> str:
-    """注销 Token，使其失效
-
-    Args:
-        token: 要注销的 Token
-        ctx: MCP上下文
-    """
-    if _revoke_token(token):
-        return json.dumps({"status": "success", "message": "Token 已注销"}, ensure_ascii=False, indent=2)
-    else:
-        return json.dumps({"status": "error", "message": "Token 不存在或已过期"}, ensure_ascii=False, indent=2)
-
-
-@mcp.tool()
-@auth_required              # Token 认证检查（最外层）
-@with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def firmwareDownload(
-    pcIP: str,
-    ftpServer: str,
-    ftpUser: str,
-    ftpPassword: str,
-    firmwarePath: str,
-    token: str,
-    ctx: Context,
-    localDir: str = "C:\\firmware_upgrade",
-    localFilename: str = "firmware.bin",
-    userName: str = "",
-) -> str:
-    """从FTP服务器下载固件到PC代理
-
-    Args:
-        pcIP: PC代理的IP地址
-        ftpServer: FTP服务器地址
-        ftpUser: FTP用户名
-        ftpPassword: FTP密码
-        firmwarePath: 固件文件路径
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        localDir: 本地保存目录
-        localFilename: 本地文件名
-        userName: IDE运行系统的登录用户名，由IDE侧传入
-    """
-    proxy_url = f"http://{pcIP}:8888/firmware/download"
-    payload = {
-        "ftpServer": ftpServer,
-        "ftpUser": ftpUser,
-        "ftpPassword": ftpPassword,
-        "firmwarePath": firmwarePath,
-        "localDir": localDir,
-        "localFilename": localFilename
-    }
-
-    try:
-        response = requests.post(proxy_url, json=payload, timeout=300)
-        return response.text
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-@mcp.tool()
-@auth_required              # Token 认证检查（最外层）
-@with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def firmwareUpload(
-    pcIP: str,
-    deviceIP: str,
-    deviceUser: str,
-    DevicePwd: str,
-    localPath: str,
-    token: str,
-    ctx: Context,
-    preserve: str = "Retain",
-    rebootMode: str = "Auto",
-    userName: str = "",
-) -> str:
-    """通过HTTP上传固件到BMC设备
-
-    Args:
-        pcIP: PC代理的IP地址
-        deviceIP: BMC设备IP地址
-        deviceUser: 设备用户名
-        DevicePwd: 设备密码
-        localPath: 固件文件本地路径
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        preserve: 配置保留策略（Retain/Restore/ForceRestore）
-        rebootMode: 重启模式（Auto/Manual）
-        userName: IDE运行系统的登录用户名，由IDE侧传入
-    """
-    proxy_url = f"http://{pcIP}:8888/firmware/upload"
-    payload = {
-        "deviceIP": deviceIP,
-        "deviceUser": deviceUser,
-        "DevicePwd": DevicePwd,
-        "localPath": localPath,
-        "preserve": preserve,
-        "rebootMode": rebootMode
-    }
-
-    try:
-        response = requests.post(proxy_url, json=payload, timeout=300)
-        return response.text
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-@mcp.tool()
-@auth_required              # Token 认证检查（最外层）
-@with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def firmwareStatus(
-    pcIP: str,
-    deviceIP: str,
-    deviceUser: str,
-    DevicePwd: str,
-    token: str,
-    ctx: Context,
-    userName: str = "",
-) -> str:
-    """查询固件升级状态
-
-    Args:
-        pcIP: PC代理的IP地址
-        deviceIP: BMC设备IP地址
-        deviceUser: 设备用户名
-        DevicePwd: 设备密码
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        userName: IDE运行系统的登录用户名，由IDE侧传入
-    """
-    proxy_url = f"http://{pcIP}:8888/redfish"
-    payload = {
-        "deviceIP": deviceIP,
-        "deviceUser": deviceUser,
-        "devicePwd": DevicePwd,
-        "method": "GET",
-        "url": "/redfish/v1/UpdateService",
-        "body": ""
-    }
-
-    try:
-        response = requests.post(proxy_url, json=payload, timeout=60)
-        return response.text
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-@mcp.tool()
-@auth_required              # Token 认证检查（最外层）
-@with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def tftpServerStart(
-    pcIP: str,
-    token: str,
-    ctx: Context,
-    userName: str = "",
-) -> str:
-    """在PC代理上启动TFTP服务器
-
-    Args:
-        pcIP: PC代理的IP地址（大网IP，如 10.41.112.148）
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        userName: IDE运行系统的登录用户名，由IDE侧传入
-    """
-    proxy_url = f"http://{pcIP}:8888/firmware/tftp/start"
-    payload = {}
-
-    try:
-        response = requests.post(proxy_url, json=payload, timeout=30)
-        return response.text
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
-
-@mcp.tool()
-@auth_required              # Token 认证检查（最外层）
-@with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
-@validate_input            # 输入参数校验
-async def tftpServerStop(
-    pcIP: str,
-    token: str,
-    ctx: Context,
-    userName: str = "",
-) -> str:
-    """在PC代理上停止TFTP服务器
-
-    Args:
-        pcIP: PC代理的IP地址（大网IP，如 10.41.112.148）
-        token: 认证Token（通过 authenticate 工具获取）
-        ctx: MCP上下文
-        userName: IDE运行系统的登录用户名，由IDE侧传入
-    """
-    proxy_url = f"http://{pcIP}:8888/firmware/tftp/stop"
-    payload = {}
-
-    try:
-        response = requests.post(proxy_url, json=payload, timeout=30)
-        return response.text
-    except Exception as e:
-        return json.dumps({"error": str(e)}, ensure_ascii=False)
-
 
 if __name__ == "__main__":
-    # 注册认证中间件
+    # 添加连接级别认证中间件
     if AUTH_ENABLED:
-        app = mcp.streamable_http_app()
-        # 注册 /auth/token 认证端点（无需 Token 即可访问）
-        app.add_route("/auth/token", token_endpoint, methods=["POST"])
-        # 注册认证中间件（/auth 路径已放行，仅 /mcp 需要认证）
-        app.add_middleware(AuthMiddleware)
-        # 打印服务端 Token，用于 MCP Client 配置
-        server_token = get_server_token()
+        # 启动后台线程定期清理过期缓存
+        import threading
+        import time
+
+        def cache_cleanup_worker():
+            """后台工作线程，定期清理过期的认证缓存"""
+            while True:
+                time.sleep(300)  # 每5分钟清理一次
+                ConnectionAuthMiddleware.clear_expired_cache()
+
+        cleanup_thread = threading.Thread(target=cache_cleanup_worker, daemon=True)
+        cleanup_thread.start()
+
+        # Monkey patch streamable_http_app方法来添加中间件
+        original_streamable_http_app = mcp.streamable_http_app
+
+        def streamable_http_app_with_auth():
+            # 获取原始的Starlette应用
+            app = original_streamable_http_app()
+
+            # 添加连接认证中间件
+            app.add_middleware(ConnectionAuthMiddleware)
+
+            return app
+
+        # 替换方法
+        mcp.streamable_http_app = streamable_http_app_with_auth
+
         print(f"\n{'='*60}")
         print(f"[认证] 用户认证已启用")
-        print(f"[认证] 支持以下认证方式：")
-        print(f"[认证]   1. Basic Auth（推荐）：在 mcp.json 中配置用户名/密码")
-        print(f"[认证]      格式: Authorization: Basic <base64(username:password)>")
-        print(f"[认证]   2. Bearer Token：使用服务端固定 Token")
-        print(f"[认证]      服务端 Token: {server_token}")
-        print(f"[认证]      格式: Authorization: Bearer {server_token}")
-        print(f"[认证]   3. 临时 Token：调用 authenticate 工具获取")
-        print(f"[认证]      或使用用户名/密码获取 Token: POST /auth/token")
+        print(f"[认证] 认证方式：连接级别 Basic Auth（HTTP层）")
+        print(f"[认证] MCP Client 配置示例:")
+        print(f'[认证]   "headers": {{"Authorization": "Basic YWRtaW46YWRtaW4xMjM="}}')
         print(f"{'='*60}\n")
-        # 手动启动 uvicorn，使用已注册中间件的 app
-        import uvicorn
-        config = uvicorn.Config(
-            app,
-            host=mcp.settings.host,
-            port=mcp.settings.port,
-            log_level=mcp.settings.log_level.lower(),
-        )
-        server = uvicorn.Server(config)
-        import anyio
-        anyio.run(server.serve)
-    else:
-        print("Starting SWRDMCPServer on 0.0.0.0:8000")
-        print(f"Allowed hosts: {allowed_hosts}")
-        print(f"Allowed origins: {allowed_origins}")
-        mcp.run(transport="streamable-http")
+    
+    print("Starting SWRDMCPServer on 0.0.0.0:8000")
+    mcp.run(transport="streamable-http")

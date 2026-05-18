@@ -19,20 +19,13 @@ import subprocess
 import threading
 import time
 import os
-import re
-import sys
+import ssl
 from typing import Any
-from socketserver import ThreadingMixIn
 
 try:
     import requests as _requests
 except Exception:
     _requests = None
-
-try:
-    import psutil as _psutil
-except Exception:
-    _psutil = None
 
 try:
     from playwright.sync_api import sync_playwright
@@ -42,139 +35,6 @@ except Exception:
 _thread_local = threading.local()
 _SESSIONS: dict[str, dict[str, Any]] = {}
 _SESSIONS_LOCK = threading.Lock()
-
-# TFTP服务器
-_firmware_tftp_process = None
-_firmware_tftp_port = 69  # TFTP标准端口
-_firmware_dir = r"C:\firmware_upgrade"
-_tftpd32_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tftpd32.exe")
-
-
-def start_firmware_tftp_server():
-    """启动固件文件TFTP服务器 - 使用tftpd32.exe实现"""
-    global _firmware_tftp_process
-
-    # 检查TFTP服务器是否真的在运行
-    if _firmware_tftp_process is not None:
-        # 检查进程是否还在运行
-        if _firmware_tftp_process.poll() is None:
-            return {"ok": True, "message": "TFTP服务器已在运行"}
-        else:
-            # 进程已退出，重置状态
-            print(f"[TFTP服务器] 检测到进程已退出，重置状态")
-            _firmware_tftp_process = None
-
-    try:
-        # 检查固件目录是否存在
-        if not os.path.exists(_firmware_dir):
-            os.makedirs(_firmware_dir, exist_ok=True)
-            print(f"[TFTP服务器] 创建固件目录: {_firmware_dir}")
-
-        # 检查tftpd32.exe是否存在
-        if not os.path.exists(_tftpd32_exe):
-            return {"ok": False, "error": f"tftpd32.exe不存在: {_tftpd32_exe}"}
-
-        # 不重新创建配置文件，使用现有的tftpd32.ini
-        tftpd32_ini = os.path.join(os.path.dirname(_tftpd32_exe), "tftpd32.ini")
-
-        print(f"[TFTP服务器] 使用现有配置文件: {tftpd32_ini}")
-        print(f"[TFTP服务器] TFTP根目录: {_firmware_dir}")
-        print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
-
-        # 启动tftpd32.exe TFTP服务器
-        # tftpd32.exe会自动读取同目录下的tftpd32.ini配置文件
-        # 直接启动tftpd32.exe，不使用start命令
-        tftp_dir = os.path.dirname(_tftpd32_exe)
-        cmd = [_tftpd32_exe]
-
-        print(f"[TFTP服务器] 启动命令: {cmd[0]}")
-
-        # 直接启动tftpd32.exe，使用CREATE_NEW_CONSOLE在新窗口中运行
-        _firmware_tftp_process = subprocess.Popen(
-            cmd,
-            cwd=tftp_dir,
-            creationflags=subprocess.CREATE_NEW_CONSOLE
-        )
-
-        # 等待一段时间让TFTP服务器启动
-        time.sleep(5)
-
-        # 检查端口是否被监听
-        import socket
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # 尝试绑定端口，如果失败说明端口已被占用
-            sock.bind(("0.0.0.0", _firmware_tftp_port))
-            sock.close()
-            # 端口未被占用，启动失败
-            _firmware_tftp_process = None
-            print(f"[TFTP服务器] 启动失败：端口 {_firmware_tftp_port} 未被监听")
-            return {"ok": False, "error": f"TFTP服务器启动失败：端口 {_firmware_tftp_port} 未被监听"}
-        except socket.error:
-            # 端口已被占用，说明TFTP服务器已成功启动
-            sock.close()
-            print(f"[TFTP服务器] tftpd32.exe TFTP服务器已启动")
-            print(f"[TFTP服务器] 监听端口: {_firmware_tftp_port}")
-            print(f"[TFTP服务器] 工作目录: {_firmware_dir}")
-            return {"ok": True, "message": f"TFTP服务器已启动，监听端口 {_firmware_tftp_port}，工作目录: {_firmware_dir}"}
-
-    except Exception as e:
-        print(f"[TFTP服务器] 启动失败: {e}")
-        _firmware_tftp_process = None
-        return {"ok": False, "error": str(e)}
-
-
-def stop_firmware_tftp_server():
-    """停止固件文件TFTP服务器"""
-    global _firmware_tftp_process
-
-    # 先尝试停止已记录的进程
-    if _firmware_tftp_process is not None:
-        try:
-            _firmware_tftp_process.terminate()
-            try:
-                _firmware_tftp_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                _firmware_tftp_process.kill()
-                _firmware_tftp_process.wait()
-            print("[TFTP服务器] 已停止记录的进程")
-        except Exception as e:
-            print(f"[TFTP服务器] 停止记录的进程失败: {e}")
-
-    # 查找并停止所有tftpd32.exe进程
-    try:
-        if _psutil is None:
-            return {"ok": False, "error": "psutil模块未安装，无法查找和停止tftpd32进程"}
-
-        killed_count = 0
-        print("[TFTP服务器] 开始查找tftpd32进程...")
-        for proc in _psutil.process_iter(['pid', 'name', 'exe']):
-            try:
-                proc_name = proc.info.get('name', '')
-                if proc_name and 'tftpd32' in proc_name.lower():
-                    print(f"[TFTP服务器] 发现tftpd32进程: PID={proc.info['pid']}, 路径={proc.info.get('exe')}")
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except _psutil.TimeoutExpired:
-                        proc.kill()
-                        proc.wait()
-                    killed_count += 1
-                    print(f"[TFTP服务器] 已停止进程: PID={proc.info['pid']}")
-            except (_psutil.NoSuchProcess, _psutil.AccessDenied, _psutil.ZombieProcess) as e:
-                print(f"[TFTP服务器] 访问进程失败: {e}")
-                continue
-
-        _firmware_tftp_process = None
-        if killed_count > 0:
-            print(f"[TFTP服务器] 共停止了 {killed_count} 个tftpd32进程")
-            return {"ok": True, "message": f"TFTP服务器已停止，共停止了 {killed_count} 个进程"}
-        else:
-            print("[TFTP服务器] 未找到运行中的tftpd32进程")
-            return {"ok": True, "message": "TFTP服务器未运行"}
-    except Exception as e:
-        print(f"[TFTP服务器] 停止失败: {e}")
-        return {"ok": False, "error": str(e)}
 
 
 
@@ -366,14 +226,8 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
             self._handle_browser_run()
         elif self.path == "/browser/close":
             self._handle_browser_close()
-        elif self.path == "/firmware/download":
-            self._handle_firmware_download()
-        elif self.path == "/firmware/upload":
-            self._handle_firmware_upload()
-        elif self.path == "/firmware/tftp/start":
-            self._handle_firmware_tftp_start()
-        elif self.path == "/firmware/tftp/stop":
-            self._handle_firmware_tftp_stop()
+        elif self.path == "/command":
+            self._handle_command()
         else:
             self._send_error_response(404, f"路径不存在: {self.path}")
 
@@ -513,234 +367,422 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
         except Exception as e:
             self._send_error_response(500, f"browser close 失败: {e}")
 
-    def _handle_firmware_download(self):
-        """从FTP服务器下载固件到PC代理"""
+    def _handle_command(self):
+        """处理通用命令执行请求"""
         try:
             payload = self._read_payload() or {}
-            
-            ftp_server = payload.get("ftpServer", "")
-            ftp_user = payload.get("ftpUser", "")
-            ftp_password = payload.get("ftpPassword", "")
-            firmware_path = payload.get("firmwarePath", "")
-            local_dir = payload.get("localDir", "C:\\firmware_upgrade")
-            local_filename = payload.get("localFilename", "firmware.bin")
-            
-            if not all([ftp_server, ftp_user, ftp_password, firmware_path]):
-                self._send_error_response(400, "缺少FTP服务器信息")
-                return
-            
-            # 创建本地目录
-            import os
-            os.makedirs(local_dir, exist_ok=True)
-            
-            # 构建FTP URL
-            ftp_url = f"ftp://{ftp_user}:{ftp_password}@{ftp_server}{firmware_path}"
-            local_path = os.path.join(local_dir, local_filename)
-            
-            # 使用curl下载
-            cmd = ["curl", "-o", local_path, ftp_url]
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            
-            # 检查文件是否存在并获取大小
-            file_size = 0
-            if os.path.exists(local_path):
-                file_size = os.path.getsize(local_path)
-            
-            result = {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "local_path": local_path,
-                "file_size": file_size,
-                "success": proc.returncode == 0 and file_size > 0
-            }
-            
-            self.log_message("固件下载完成: %s, 大小: %d bytes", local_path, file_size)
-            self._send_json(200, result)
-        except Exception as e:
-            self.log_message("固件下载失败: %s", str(e))
-            self._send_error_response(500, f"固件下载失败: {e}")
+            command_type = payload.get("commandType", "").lower()
+            params_str = payload.get("params", "{}")
 
-    def _handle_firmware_upload(self):
-        """通过TFTP上传固件到BMC设备（优先方式）"""
-        try:
-            payload = self._read_payload() or {}
-
-            device_ip = payload.get("deviceIP", "")
-            device_user = payload.get("deviceUser", "")
-            device_pwd = payload.get("DevicePwd", "")
-            local_path = payload.get("localPath", "")
-            preserve = payload.get("preserve", "Retain")
-            reboot_mode = payload.get("rebootMode", "Auto")
-            pc_ip = payload.get("pcIP", "192.168.33.199")  # PC代理的设备网IP
-
-            # 如果没有指定本地路径，使用默认路径
-            if not local_path:
-                # 尝试从固件路径参数中提取文件名
-                firmware_path = payload.get("firmwarePath", "")
-                if firmware_path:
-                    local_filename = os.path.basename(firmware_path)
-                    local_path = os.path.join(_firmware_dir, local_filename)
-                    self.log_message("使用固件路径参数: %s", local_path)
-                else:
-                    self._send_error_response(400, "缺少 localPath 或 firmwarePath 参数")
-                    return
-
-            if not all([device_ip, device_user, device_pwd]):
-                self._send_error_response(400, "缺少必要参数")
+            # 解析 params JSON
+            try:
+                params = json.loads(params_str) if isinstance(params_str, str) else params_str
+            except (json.JSONDecodeError, TypeError):
+                self._send_error_response(400, f"params 不是有效的 JSON: {params_str}")
                 return
 
-            # 检查文件是否存在
-            import os
-            if not os.path.exists(local_path):
-                self._send_error_response(404, f"固件文件不存在: {local_path}")
+            if not command_type:
+                self._send_error_response(400, "缺少 commandType")
                 return
 
-            # 获取固件文件名
-            firmware_filename = os.path.basename(local_path)
-            self.log_message("固件文件名: %s", firmware_filename)
+            handler = _COMMAND_HANDLERS.get(command_type)
+            if not handler:
+                self._send_error_response(400, f"不支持的命令类型: {command_type}")
+                return
 
-            # 步骤1: 启动TFTP服务器
-            self.log_message("步骤1: 启动TFTP服务器...")
-            tftp_result = start_firmware_tftp_server()
-            if not tftp_result.get("ok"):
-                self.log_message("TFTP服务器启动失败: %s", tftp_result.get("error"))
-                # TFTP启动失败，回退到HTTP方式
-                self.log_message("回退到HTTP上传方式...")
-                return self._upload_via_http(device_ip, device_user, device_pwd,
-                                            local_path, preserve, reboot_mode)
+            self.log_message("执行命令: %s, params: %s", command_type, params_str)
+            result = handler(params)
+            self._send_json(200, result)
 
-            self.log_message("TFTP服务器启动成功")
+        except Exception as e:
+            self.log_message("命令执行失败: %s", str(e))
+            self._send_error_response(500, f"命令执行失败: {e}")
 
-            # 步骤2: 构建TFTP URI
-            tftp_uri = f"tftp://{pc_ip}/{firmware_filename}"
-            self.log_message("步骤2: TFTP URI: %s", tftp_uri)
 
-            # 步骤3: 通过Redfish SimpleUpdate接口触发固件升级
-            self.log_message("步骤3: 通过Redfish触发固件升级...")
-            upgrade_url = f"https://{device_ip}/redfish/v1/UpdateService/Actions/UpdateService.SimpleUpdate"
+# ──────────────────────────────────────────────
+# 通用命令执行
+# ──────────────────────────────────────────────
 
-            # 构建请求体
-            request_body = {
-                "ImageURI": tftp_uri,
-                "Oem": {
-                    "Public": {
-                        "Preserve": preserve,
-                        "RebootMode": reboot_mode
-                    }
-                }
-            }
+# 串口连接管理
+_SERIAL_CONNECTIONS: dict[str, subprocess.Popen] = {}
+_SERIAL_LOCK = threading.Lock()
 
-            # 使用curl发送Redfish请求
-            cmd = [
-                "curl", "-k", "-X", "POST", upgrade_url,
-                "-u", f"{device_user}:{device_pwd}",
-                "-H", "Content-Type: application/json",
-                "-d", json.dumps(request_body, ensure_ascii=False)
-            ]
 
-            self.log_message("发送Redfish请求到: %s", upgrade_url)
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300
+def _exec_ftp_download(params: dict) -> dict:
+    """从FTP服务器下载文件"""
+    ftp_server = params.get("ftpServer", "")
+    ftp_user = params.get("ftpUser", "")
+    ftp_password = params.get("ftpPassword", "")
+    remote_path = params.get("remotePath", "")
+    local_path = params.get("localPath", "")
+
+    if not all([ftp_server, ftp_user, ftp_password, remote_path, local_path]):
+        return {"ok": False, "error": "缺少FTP下载参数"}
+
+    # 确保本地目录存在
+    local_dir = os.path.dirname(local_path)
+    if local_dir:
+        os.makedirs(local_dir, exist_ok=True)
+
+    # 使用 curl 下载
+    ftp_url = f"ftp://{ftp_user}:{ftp_password}@{ftp_server}{remote_path}"
+    cmd = ["curl", "-o", local_path, ftp_url]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+        return {
+            "ok": proc.returncode == 0 and file_size > 0,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "local_path": local_path,
+            "file_size": file_size,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "FTP下载超时（300秒）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _exec_serial(params: dict) -> dict:
+    """连接设备串口（通过 plink 或串口工具）"""
+    host = params.get("host", "")
+    port = params.get("port", 3004)
+    baud = params.get("baud", 115200)
+    action = params.get("action", "open").lower()
+    session_id = params.get("sessionId", f"serial_{host}_{port}")
+
+    if action == "close":
+        with _SERIAL_LOCK:
+            proc = _SERIAL_CONNECTIONS.pop(session_id, None)
+            if proc:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    proc.kill()
+                return {"ok": True, "message": f"串口连接已关闭: {session_id}"}
+            return {"ok": True, "message": "串口连接不存在"}
+
+    # action == "open"
+    if not host or not port:
+        return {"ok": False, "error": "缺少串口连接参数 host 或 port"}
+
+    # 使用 plink 建立串口连接（通过串口交换机）
+    cmd = [
+        "plink", "-telnet",
+        "-P", str(port),
+        host,
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with _SERIAL_LOCK:
+            # 关闭已有连接
+            old_proc = _SERIAL_CONNECTIONS.get(session_id)
+            if old_proc:
+                try:
+                    old_proc.terminate()
+                except Exception:
+                    pass
+            _SERIAL_CONNECTIONS[session_id] = proc
+
+        return {"ok": True, "message": f"串口连接已建立: {host}:{port}", "sessionId": session_id}
+    except FileNotFoundError:
+        return {"ok": False, "error": "plink 未安装，请安装 PuTTY"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _exec_ssh(params: dict) -> dict:
+    """SSH连接到设备并执行命令"""
+    host = params.get("host", "")
+    port = params.get("port", 22)
+    user = params.get("user", "")
+    password = params.get("password", "")
+    command = params.get("command", "")
+    timeout = params.get("timeout", 30)
+
+    if not all([host, user, command]):
+        return {"ok": False, "error": "缺少SSH参数 host、user 或 command"}
+
+    # 使用 sshpass + ssh 执行远程命令
+    # 如果 sshpass 不可用，尝试使用 plink
+    cmd = [
+        "sshpass", "-p", password,
+        "ssh", "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-p", str(port),
+        f"{user}@{host}",
+        command,
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    except FileNotFoundError:
+        # sshpass 不可用，尝试 plink
+        return _exec_ssh_via_plink(host, port, user, password, command, timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"SSH命令执行超时（{timeout}秒）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def _exec_ssh_via_plink(host: str, port: int, user: str, password: str, command: str, timeout: int) -> dict:
+    """通过 plink 执行 SSH 命令（sshpass 不可用时的回退方案）"""
+    try:
+        # 使用 echo 管道传递密码
+        cmd = [
+            "cmd.exe", "/c",
+            f"echo {password} | plink -ssh -P {port} -l {user} -pw {password} "
+            f"-batch -no-antispoof {host} {command}"
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+            "method": "plink",
+        }
+    except FileNotFoundError:
+        return {"ok": False, "error": "sshpass 和 plink 均未安装，无法执行SSH命令"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"SSH命令执行超时（{timeout}秒）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# TFTP 服务器管理
+_TFTP_PROCESS: subprocess.Popen | None = None
+_TFTP_LOCK = threading.Lock()
+
+
+def _exec_tftp_server(params: dict) -> dict:
+    """启动/停止 TFTP 服务器"""
+    global _TFTP_PROCESS
+
+    action = params.get("action", "").lower()
+    port = params.get("port", 69)
+    tftp_dir = params.get("dir", r"C:\firmware_upgrade")
+
+    if action == "stop":
+        with _TFTP_LOCK:
+            if _TFTP_PROCESS:
+                try:
+                    _TFTP_PROCESS.terminate()
+                    _TFTP_PROCESS.wait(timeout=5)
+                except Exception:
+                    _TFTP_PROCESS.kill()
+                _TFTP_PROCESS = None
+            return {"ok": True, "message": "TFTP服务器已停止"}
+
+    if action != "start":
+        return {"ok": False, "error": f"不支持的 TFTP 操作: {action}，支持 start/stop"}
+
+    # 启动 TFTP 服务器
+    with _TFTP_LOCK:
+        if _TFTP_PROCESS and _TFTP_PROCESS.poll() is None:
+            return {"ok": True, "message": "TFTP服务器已在运行"}
+
+        # 确保目录存在
+        os.makedirs(tftp_dir, exist_ok=True)
+
+        # 查找 tftpd32.exe
+        tftpd32_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tftpd32.exe")
+        if not os.path.exists(tftpd32_exe):
+            return {"ok": False, "error": f"tftpd32.exe 不存在: {tftpd32_exe}"}
+
+        try:
+            _TFTP_PROCESS = subprocess.Popen(
+                [tftpd32_exe],
+                cwd=os.path.dirname(tftpd32_exe),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
-
-            result = {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "tftp_uri": tftp_uri,
-                "method": "TFTP",
-                "success": proc.returncode == 0,
-                "message": "固件升级请求已触发，TFTP服务器正在运行，请监控升级进度。当升级进度达到60%时，固件上传完成，可以手动停止TFTP服务器。"
-            }
-
-            self.log_message("固件升级请求完成: 返回码: %d", proc.returncode)
-            self.log_message("注意: TFTP服务器仍在运行，BMC设备正在通过TFTP下载固件文件")
-            self.log_message("提示: 请监控升级进度，当进度达到60%%时可以手动停止TFTP服务器")
-
-            self._send_json(200, result)
+            return {"ok": True, "message": f"TFTP服务器已启动，端口: {port}，目录: {tftp_dir}"}
         except Exception as e:
-            self.log_message("固件上传失败: %s", str(e))
-            self._send_error_response(500, f"固件上传失败: {e}")
+            return {"ok": False, "error": f"TFTP服务器启动失败: {e}"}
 
-    def _upload_via_http(self, device_ip: str, device_user: str, device_pwd: str,
-                        local_path: str, preserve: str, reboot_mode: str):
-        """通过HTTP multipart/form-data上传固件到BMC设备（备用方式）"""
-        try:
-            self.log_message("使用HTTP方式上传固件: %s", local_path)
 
-            # 使用curl multipart/form-data上传到H3C BMC的UpdateService接口
-            upload_url = f"https://{device_ip}/redfish/v1/UpdateService"
+def _exec_shell(params: dict) -> dict:
+    """在PC代理上执行 shell 命令"""
+    command = params.get("command", "")
+    timeout = params.get("timeout", 30)
 
-            # 构建curl命令 - 使用form-data格式
-            cmd = [
-                "curl", "-k", "-X", "PATCH", upload_url,
-                "-u", f"{device_user}:{device_pwd}"
-            ]
+    if not command:
+        return {"ok": False, "error": "缺少 shell 命令"}
 
-            # 添加form-data字段
-            cmd.extend(["-F", f"rom.ima=@{local_path}"])
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=True,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"Shell命令执行超时（{timeout}秒）"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
-            # 如果有其他参数，可以添加
-            if preserve:
-                cmd.extend(["-F", f"Preserve={preserve}"])
-            if reboot_mode:
-                cmd.extend(["-F", f"RebootMode={reboot_mode}"])
 
-            self.log_message("开始HTTP上传固件到: %s", upload_url)
+# 命令类型到处理函数的映射
+_COMMAND_HANDLERS = {
+    "ftp_download": _exec_ftp_download,
+    "serial": _exec_serial,
+    "ssh": _exec_ssh,
+    "tftp_server": _exec_tftp_server,
+    "shell": _exec_shell,
+}
 
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300
+
+def _generate_self_signed_cert(cert_path: str, key_path: str):
+    """生成自签名SSL证书（优先使用 Python cryptography，回退到 openssl）"""
+    import socket as _socket
+
+    hostname = _socket.gethostname()
+
+    # 优先使用 Python 方式（跨平台更可靠）
+    try:
+        _generate_self_signed_cert_python(cert_path, key_path)
+        return
+    except ImportError:
+        print("[SSL] cryptography 库未安装，尝试使用 openssl...")
+    except Exception as e:
+        print(f"[SSL] Python 生成证书失败: {e}")
+        print("[SSL] 尝试使用 openssl...")
+
+    # 回退到 openssl
+    openssl_cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048",
+        "-keyout", key_path,
+        "-out", cert_path,
+        "-days", "3650",
+        "-nodes",
+        "-subj", f"/CN={hostname}/O=LocalProxy",
+        "-addext", f"subjectAltName=DNS:{hostname},DNS:localhost,IP:127.0.0.1"
+    ]
+
+    try:
+        subprocess.run(openssl_cmd, check=True, capture_output=True, text=True)
+        print(f"[SSL] 自签名证书已生成: {cert_path}")
+        print(f"[SSL] 私钥已生成: {key_path}")
+    except Exception as e:
+        raise RuntimeError(
+            "无法生成自签名证书。请安装 cryptography 库:\n"
+            "  pip install cryptography\n"
+        ) from e
+
+
+def _generate_self_signed_cert_python(cert_path: str, key_path: str):
+    """使用 Python 的 cryptography 库生成自签名证书"""
+    import socket as _socket
+    import ipaddress
+    from datetime import datetime, timedelta, timezone
+
+    hostname = _socket.gethostname()
+
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+        # 生成私钥
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+
+        # 保存私钥
+        with open(key_path, "wb") as f:
+            f.write(private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            ))
+
+        # 构建证书
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "CN"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LocalProxy"),
+            x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+        ])
+
+        now = datetime.now(timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + timedelta(days=3650))
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.DNSName(hostname),
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                ]),
+                critical=False,
             )
+            .sign(private_key, hashes.SHA256(), backend=default_backend())
+        )
 
-            result = {
-                "returncode": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "method": "HTTP",
-                "success": proc.returncode == 0
-            }
+        with open(cert_path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-            self.log_message("HTTP固件上传完成: 返回码: %d", proc.returncode)
+        print(f"[SSL] 自签名证书已生成 (cryptography): {cert_path}")
 
-            self._send_json(200, result)
-        except Exception as e:
-            self.log_message("HTTP固件上传失败: %s", str(e))
-            self._send_error_response(500, f"HTTP固件上传失败: {e}")
-
-    def _handle_firmware_tftp_start(self):
-        """启动固件文件TFTP服务器"""
-        try:
-            result = start_firmware_tftp_server()
-            self._send_json(200, result)
-        except Exception as e:
-            self._send_error_response(500, f"启动TFTP服务器失败: {e}")
-
-    def _handle_firmware_tftp_stop(self):
-        """停止固件文件TFTP服务器"""
-        try:
-            result = stop_firmware_tftp_server()
-            self._send_json(200, result)
-        except Exception as e:
-            self._send_error_response(500, f"停止TFTP服务器失败: {e}")
+    except ImportError:
+        raise RuntimeError(
+            "无法生成自签名证书。请安装 cryptography 库:\n"
+            "  pip install cryptography\n"
+            "或者确保 openssl 命令可用。"
+        )
 
 
-def run_proxy_server(host="0.0.0.0", port=8888):
+def run_proxy_server(host="0.0.0.0", port=8888, cert_file=None, key_file=None):
     server_address = (host, port)
     httpd = http.server.HTTPServer(server_address, LocalProxyHandler)
-    
-    print(f"Local Proxy 启动: http://{host}:{port}")
+
+    # 如果没有指定证书，自动生成自签名证书
+    if cert_file is None or key_file is None:
+        cert_dir = os.path.dirname(os.path.abspath(__file__))
+        cert_file = os.path.join(cert_dir, "proxy_cert.pem")
+        key_file = os.path.join(cert_dir, "proxy_key.pem")
+
+        if not (os.path.exists(cert_file) and os.path.exists(key_file)):
+            _generate_self_signed_cert(cert_file, key_file)
+
+    # 配置 SSL
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert_file, key_file)
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+
+    print(f"Local Proxy 启动: https://{host}:{port}")
     print("模式: 单线程，支持 Redfish/IPMI 转发和浏览器控制")
     print("\n支持的路径:")
     print("  - /redfish: 转发 Redfish 请求到目标设备")
@@ -748,11 +790,7 @@ def run_proxy_server(host="0.0.0.0", port=8888):
     print("  - /browser/open: 打开浏览器")
     print("  - /browser/run: 执行浏览器操作")
     print("  - /browser/close: 关闭浏览器")
-    print("  - /firmware/download: 从FTP下载固件")
-    print("  - /firmware/upload: 上传固件到BMC")
-    print("  - /firmware/tftp/start: 启动固件TFTP服务器")
-    print("  - /firmware/tftp/stop: 停止固件TFTP服务器")
-    print("\n注意: TFTP服务器需要手动启动，使用 /firmware/tftp/start 接口")
+    print("  - /command: 执行本地命令（ftp_download/serial/ssh/tftp_server/shell）")
 
     httpd.serve_forever()
 

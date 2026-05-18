@@ -1,19 +1,49 @@
 # SWRDMCPServer 设计文档
 
-> 版本：1.2 | 日期：2026-04-24 | 状态：更新（完善用户认证与 Token 认证描述）
+> 版本：1.3 | 日期：2026-05-18 | 状态：更新（新增 sendCommand 通用命令执行工具、高危命令拦截、PC 代理 HTTPS 通信）
 
 ---
 
 ## 目录
 
 1. [总体设计思路](#1-总体设计思路)
-2. [用户认证方案](#2-用户认证方案)
-3. [数据流详解](#3-数据流详解)
-4. [安全审计方案](#4-安全审计方案)
-5. [附录：配置参考](#5-附录配置参考)
-6. [附录：已知风险与改进建议](#6-已知风险与改进建议)
-
-> **第 2 章节更新说明**：新增 2.6 认证日志事件、2.7 `/auth/token` HTTP 端点、2.8 认证配置等小节，完善用户认证与 Token 认证的描述。
+   - 1.1 [项目定位](#11-项目定位)
+   - 1.2 [设计原则](#12-设计原则)
+   - 1.3 [规格列表](#13-规格列表)
+   - 1.4 [系统架构总览](#14-系统架构总览)
+   - 1.5 [模块职责矩阵](#15-模块职责矩阵)
+2. [SWRDMCPServer 使用方法](#2-swrdmcpserver-使用方法)
+3. [测试建议](#3-测试建议)
+   - 3.1 [测试环境](#31-测试环境)
+   - 3.2 [功能测试](#32-功能测试)
+   - 3.3 [安全测试](#33-安全测试)
+   - 3.4 [异常场景测试](#34-异常场景测试)
+4. [用户认证方案](#4-用户认证方案)
+   - 4.1 [认证架构总览](#41-认证架构总览)
+   - 4.2 [认证流程](#42-认证流程)
+   - 4.3 [Token 管理机制](#43-token-管理机制)
+   - 4.4 [中间件认证方式](#44-中间件认证方式)
+   - 4.5 [认证数据流](#45-认证数据流)
+   - 4.6 [认证日志事件](#46-认证日志事件)
+   - 4.7 [/auth/token HTTP 端点](#47-authtoken-http-端点)
+   - 4.8 [认证配置](#48-认证配置)
+5. [数据流详解](#5-数据流详解)
+   - 5.1 [请求处理主流程](#51-请求处理主流程)
+   - 5.2 [Redfish 请求数据流](#52-redfish-请求数据流)
+   - 5.3 [IPMI 请求数据流](#53-ipmi-请求数据流)
+   - 5.4 [sendCommand 命令执行数据流](#54-sendcommand-命令执行数据流)
+   - 5.5 [安全拦截数据流](#55-安全拦截数据流)
+   - 5.6 [确认机制数据流](#56-确认机制数据流)
+6. [安全审计方案](#6-安全审计方案)
+   - 6.1 [安全审计总体架构](#61-安全审计总体架构)
+   - 6.2 [操作日志](#62-操作日志)
+   - 6.3 [高危操作的定义与阻拦](#63-高危操作的定义与阻拦)
+   - 6.4 [安全预警通知](#64-安全预警通知)
+7. [附录：配置参考](#7-附录配置参考)
+   - 7.1 [config.yaml（日志配置）](#71-configyaml日志配置)
+   - 7.2 [security_config.yaml（安全策略与认证配置）](#72-security_configyaml安全策略与认证配置)
+   - 7.3 [alert_config.yaml（预警配置）](#73-alert_configyaml预警配置)
+8. [附录：已知风险与改进建议](#8-附录已知风险与改进建议)
 
 ---
 
@@ -33,7 +63,67 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | **可观测性** | 全生命周期操作日志 + 多渠道安全告警，确保所有操作可追溯 |
 | **认证管控** | 用户名/密码 + 临时 Token 双重认证，所有业务操作需通过 Token 验证 |
 
-### 1.3 系统架构总览
+### 1.3 规格列表
+
+#### 1.3.1 支持的 MCP 工具
+
+| 工具名称 | 功能描述 | 风险等级 | 装饰器链 |
+|----------|----------|----------|----------|
+| `sendRedfish` | 通过 PC 代理转发 Redfish HTTP 请求到目标 BMC 设备 | 根据 HTTP Method 动态评估 | `@auth_required` → `@with_high_risk_check` → `@with_operation_log` → `@validate_input` |
+| `sendIPMI` | 通过 PC 代理执行 IPMI 命令（ipmitool） | 中危（默认） | 同上 |
+| `sendCommand` | 在 PC 代理上执行本地命令（FTP 下载/串口/SSH/TFTP/Shell） | 根据 commandType 动态评估 | 同上 |
+| `browserOpen` | 在 PC 代理上打开 Playwright 浏览器会话 | 低危 | 同上 |
+| `browserRun` | 在已打开的浏览器会话中执行操作（点击、填写、导航等） | 低危 | 同上 |
+| `browserScreenshot` | 截取浏览器当前页面截图 | 低危 | 同上 |
+| `browserClose` | 关闭浏览器会话 | 低危 | 同上 |
+| `authenticate` | 用户名/密码认证，获取临时 Token | 无（认证工具） | 无装饰器 |
+| `logout` | 注销 Token | 无（认证工具） | `@with_operation_log` → `@validate_input` |
+
+#### 1.3.2 支持的 PC 代理路由
+
+| 路由路径 | 对应 MCP 工具 | 功能描述 |
+|----------|---------------|----------|
+| `POST /redfish` | `sendRedfish` | 转发 Redfish 请求到目标设备 |
+| `POST /ipmi` | `sendIPMI` | 执行 IPMI 命令 |
+| `POST /command` | `sendCommand` | 通用命令执行（5 种子类型） |
+| `POST /browser/open` | `browserOpen` | 打开浏览器会话 |
+| `POST /browser/run` | `browserRun` | 执行浏览器操作 |
+| `POST /browser/close` | `browserClose` | 关闭浏览器会话 |
+
+#### 1.3.3 sendCommand 子命令规格
+
+| 子命令类型 | 功能描述 | 依赖工具 | 默认风险等级 | 超时时间 |
+|------------|----------|----------|-------------|----------|
+| `ftp_download` | 从 FTP 服务器下载文件到 PC 代理本地 | curl | 低危 | 300s |
+| `serial` | 通过串口交换机连接设备串口（plink telnet） | plink (PuTTY) | 中危 | - |
+| `ssh` | SSH 连接到设备并执行远程命令 | sshpass / plink | 高危 | 可配置（默认 30s） |
+| `tftp_server` | 启动/停止 TFTP 文件传输服务器 | tftpd32.exe | 低危 | - |
+| `shell` | 在 PC 代理本地执行 Shell 命令 | cmd.exe | 高危~严重 | 可配置（默认 30s） |
+
+#### 1.3.4 安全防护规格
+
+| 防护维度 | 规格说明 |
+|----------|----------|
+| 认证方式 | 连接级 Basic Auth + 工具级 Token 验证 |
+| Token 有效期 | 可配置（默认 3600 秒） |
+| 风险等级 | 4 级：低危 / 中危 / 高危 / 严重 |
+| 处理策略 | 4 种：allow / log / confirm / block |
+| 高危命令检测 | 16 个关键词（del, rm, shutdown, reboot 等） |
+| 告警渠道 | 邮件 / 钉钉 / 企业微信 / 自定义 Webhook |
+| 操作日志 | 全生命周期记录 + 敏感信息脱敏 + 日志轮转 |
+| 参数校验 | 自动推断校验规则（IP 格式、HTTP 方法、URL 路径等） |
+| 请求体大小限制 | 可配置（默认 10MB） |
+| 确认缓存有效期 | 可配置（默认 300 秒） |
+
+#### 1.3.5 通信规格
+
+| 通信链路 | 协议 | 加密 | 备注 |
+|----------|------|------|------|
+| MCP Client ↔ MCP Server | Streamable HTTP (SSE) | 无（建议配合反向代理使用 HTTPS） | 认证通过 Authorization 头 |
+| MCP Server ↔ PC 代理 | HTTPS | 自签名证书 | `verify=False` 跳过证书验证 |
+| PC 代理 ↔ BMC 设备 | HTTPS (Redfish) / IPMI (LAN+) | Redfish 使用 BMC 证书 | `verify=False` 跳过证书验证 |
+
+### 1.4 系统架构总览
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -87,6 +177,11 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 │  │  │ Redfish HTTP 请求转发   │  │ IPMI 命令转发           │        │  │
 │  │  └─────────────────────────┘  └─────────────────────────┘        │  │
 │  │  ┌─────────────────────────┐  ┌─────────────────────────┐        │  │
+│  │  │ sendCommand()           │  │ browserOpen/Run/Close() │        │  │
+│  │  │ 通用命令执行（FTP/SSH/  │  │ 浏览器自动化控制        │        │  │
+│  │  │ 串口/TFTP/Shell）       │  │                         │        │  │
+│  │  └─────────────────────────┘  └─────────────────────────┘        │  │
+│  │  ┌─────────────────────────┐  ┌─────────────────────────┐        │  │
 │  │  │ authenticate()          │  │ logout()                │        │  │
 │  │  │ 用户名/密码 → 临时Token │  │ 注销 Token              │        │  │
 │  │  └─────────────────────────┘  └─────────────────────────┘        │  │
@@ -105,9 +200,16 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
                                ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          PC 代理                                        │
-│                    (http://{pcIP}:8888)                                  │
+│                    (https://{pcIP}:8888)                                 │
 │  ┌─────────────────────────┐  ┌─────────────────────────┐              │
 │  │ /redfish → Redfish API  │  │ /ipmi → ipmitool 命令   │              │
+│  ├─────────────────────────┤  ├─────────────────────────┤              │
+│  │ /command → 通用命令执行  │  │ /browser/* → 浏览器控制 │              │
+│  │  ├─ ftp_download        │  │  ├─ /browser/open       │              │
+│  │  ├─ serial              │  │  ├─ /browser/run        │              │
+│  │  ├─ ssh                 │  │  └─ /browser/close      │              │
+│  │  ├─ tftp_server         │  │                         │              │
+│  │  └─ shell               │  │                         │              │
 │  └──────────┬──────────────┘  └──────────┬──────────────┘              │
 └─────────────┼─────────────────────────────┼─────────────────────────────┘
               │                             │
@@ -118,14 +220,14 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 └─────────────────────────┘  └─────────────────────────┘
 ```
 
-### 1.4 模块职责矩阵
+### 1.5 模块职责矩阵
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 主入口 | `main.py` | 创建 MCP Server，注册 `sendRedfish` / `sendIPMI` / `authenticate` / `logout` 等工具，注册认证中间件和 `/auth/token` 端点，处理请求转发 |
+| 主入口 | `main.py` | 创建 MCP Server，注册 `sendRedfish` / `sendIPMI` / `sendCommand` / `authenticate` / `logout` / `browserOpen` / `browserRun` / `browserScreenshot` / `browserClose` 等工具，注册认证中间件和 `/auth/token` 端点，处理请求转发 |
 | 配置管理 | `config.py` | 加载 YAML 配置，导出全局常量（含认证配置），提供默认值兜底 |
 | 用户认证 | `decorators/auth_decorator.py` | 用户名/密码认证、临时 Token 管理、认证中间件 `AuthMiddleware`、`@auth_required` 装饰器、`/auth/token` 端点、`authenticate` / `logout` 工具 |
-| 安全拦截 | `decorators/security_decorator.py` | 风险评估、策略执行、确认缓存管理 |
+| 安全拦截 | `decorators/security_decorator.py` | 风险评估（含 sendCommand 高危命令检测）、策略执行、确认缓存管理 |
 | 操作日志 | `decorators/logging_decorator.py` | 全生命周期日志记录、敏感信息脱敏、日志轮转 |
 | 输入校验 | `decorators/validation_decorator.py` | 参数格式自动推断与校验 |
 | 预警通知 | `decorators/alert_handler.py` | 多渠道预警分发（邮件/钉钉/企微/Webhook） |
@@ -135,9 +237,337 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 
 ---
 
-## 2 用户认证方案
 
-### 2.1 认证架构总览
+---
+
+## 2 SWRDMCPServer 使用方法
+
+### 2.1 CodeBuddy MCP配置
+
+将.codebuddy整个目录拷贝至自己的工程代码目录下，这样可以让codebuddy使用里面的skills和rules文件。
+
+在CodeBuddyde MCP配置中进行如下配置：
+
+```json
+{
+  "mcpServers": {
+    "SWRDMCPServer": {
+      "url": "http://10.41.6.8:8000/mcp",
+      "transport": "streamable-http",
+      "headers": {
+        "Authorization": "Basic YWRtaW46YWRtaW4="
+      },
+      "disabled": false
+    }
+  }
+}
+```
+
+其中"url": "http://10.41.6.8:8000/mcp",是SWRDMCPServer运行的IP地址；
+
+"Authorization": "Basic czEwNjQzOnNoaXl1ZXhpITU="需要将Basic后面的字符串改为自己的域账号和密码，例如假设我的域账号是admin，密码也是admin则需要将"admin:admin"（注意中间有冒号分割）这个字符串进行base64编码（可以直接让AI进行编码）。
+
+其余字段不用做修改。
+
+### 2.2 rules&skills文件定制
+
+#### 2.2.1 rules文件定制
+
+在SystemTest.mdc文件中，需要针对自己的测试环境进行定制，主要包括自己绿区PC的IP和BMC设备的IP信息。
+
+绿区PC的IP配置：
+
+```json
+## 测试PC（PC代理）
+- 大网IP（MCP服务器调用用）：10.41.6.8
+- 设备网IP（访问BMC用）：192.168.106.43
+- PC代理端口：8888
+- PC代理地址：http://10.41.6.8:8888
+```
+
+写明自己绿区PC的大网IP和小网IP；
+
+BMC设备的IP信息：
+
+```json
+## 测试设备（BMC）
+- 测试设备IP：192.168.88.222
+- 测试设备用户名：admin
+- 测试设备密码：h3c@1234
+```
+
+包括设备的IP地址和用户名密码信息。
+
+如果还需要进行串口操作以及FTP文件下载操作，还需要进行相关的配置：
+
+```json
+## 串口
+- 测试设备串口交换机端口：192.168.0.200:3004
+
+## 固件升级配置
+- FTP服务器地址：10.141.228.15
+- FTP用户名：ftp-CCSPLSmart1
+- FTP密码：X2HWrK
+- 固件文件路径：/data-out/xxx/xxx
+- 完整固件URI：ftp://ftp-CCSPLSmart1:X2HWrK@10.141.228.15/data-out/w33199/0428/HDM3_3.05.01_FTC_signed.bin
+```
+
+#### 2.2.2 skills定制
+
+ 对BMC进行自动化测试的skills是system-test。在这个skills中会定义每个模块的测试用例，但是目前只简单使用了用户管理的模块进行举例说明。
+
+system-test/module case/yser management.md：
+
+```markdown
+---
+description: 用户管理模块的用例列表
+---
+
+Redfish命令：
+1、查询用户服务信息
+2、获取用户列表信息
+3、依次获取每个用户的详细信息
+4、获取角色列表信息
+5、依次获取指定角色信息
+
+
+IPMI命令：
+1、获取所有用户信息
+2、获取用户摘要信息
+```
+
+如果想增加模块的话，可以在SKILL.md这个文件中的“资源引用”章节，进行增加：
+
+```markdown
+##资源引用
+- reference/H3C HDM3 IPMI基础命令参考手册.md - IPMI基础命令参考手册
+- reference/H3C HDM2&HDM3 Redfish参考手册.md - Redfish参考手册
+- reference/module case/UserManager.md - 用户管理用例
+```
+
+### 2.3 运行&提示词
+
+#### 2.3.1运行说明
+
+SWRDMCPServer的运行，依赖python3.12，并安装SWRDMCPServer目录下的requirements.txt中的依赖软件包（pip install），然后在SWRDMCPServer目录下执行python main.py即可，执行成功，有如下输出：
+
+```
+PS D:\Workspace\SWRDMCPServer\MCPServer> python main.py
+============================================================
+[认证] 用户认证已启用
+[认证] 认证方式：连接级别 Basic Auth（HTTP层）
+[认证] MCP Client 配置示例:
+[认证]   "headers": {"Authorization": "Basic YWRtaW46YWRtaW4xMjM="}
+============================================================
+
+Starting SWRDMCPServer on 0.0.0.0:8000
+[32mINFO[0m:     Started server process [[36m14572[0m]
+[32mINFO[0m:     Waiting for application startup.
+StreamableHTTP session manager started
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:8000[0m (Press CTRL+C to quit)
+```
+
+绿区PC上代理程序的运行，也是依赖python3.12，并安装playwright（python -m playwright install），然后在TestTool目录下执行python local_proxy.py即可，执行成功，有如下输出：
+
+```
+PS D:\Workspace\SWRDMCPServer\TestTool> python local_proxy.py
+Local Proxy 启动: https://0.0.0.0:8888
+模式: 单线程，支持 Redfish/IPMI 转发和浏览器控制
+
+支持的路径:
+  - /redfish: 转发 Redfish 请求到目标设备
+  - /ipmi: 执行 IPMI 命令
+  - /browser/open: 打开浏览器
+  - /browser/run: 执行浏览器操作
+  - /browser/close: 关闭浏览器
+  - /command: 执行本地命令（ftp_download/serial/ssh/tftp_server/shell）
+```
+
+在MCP Server运行起来后，在code buddy中的MCP配置页面，点击刷新按钮，应该就可以正常进行连接，如果连接报错，很有可能是部门信息被阻拦了，需要在security_config.yaml中增加部门信息，例如可将三级部门信息填进去:
+
+```
+      allowed_departments:
+        - "平台软件开发部"
+        - "平台软件开发部BMC开发一部"
+        - "平台软件开发部BMC开发二部"
+        - "平台软件开发部BMC开发三部"
+```
+
+#### 2.3.2 提示词举例
+
+```
+I：请对我的BMC用户管理模块进行自动化测试。
+```
+
+AI会输出结果：
+
+```
+待测试模式涉及2条用例（Redfish + IPMI），共计7个命令，具体如下：
+
+用例描述	命令描述	命令字
+Redfish - 用户管理		
+查询用户服务信息	GET /redfish/v1/AccountService
+获取用户列表信息	GET /redfish/v1/AccountService/Accounts
+依次获取每个用户的详细信息	GET /redfish/v1/AccountService/Accounts/{user_id}
+获取角色列表信息	GET /redfish/v1/AccountService/Roles
+依次获取指定角色信息	GET /redfish/v1/AccountService/Roles/{role_id}
+IPMI - 用户管理		
+获取所有用户信息	ipmitool user list
+获取用户摘要信息	ipmitool user summary
+请确认是否继续进行测试（y/n）？
+
+以上是用户管理模块的测试计划，包含Redfish 5个命令和IPMI 2个命令，是否确认继续进行测试？
+
+确认，继续执行测试
+取消测试
+```
+
+```
+I：确认，继续执行测试
+```
+
+AI会完成测试，并输出测试报告：
+
+```
+用户管理模块自动化测试报告
+总计测试2个模块（Redfish + IPMI），2条用例，15个命令，其中0个用例失败，2个用例通过。
+
+用例描述	命令描述	命令字	测试结果
+Redfish - 用户管理			PASS
+查询用户服务信息	GET /redfish/v1/AccountService	PASS
+获取用户列表信息	GET /redfish/v1/AccountService/Accounts	PASS
+获取用户1详细信息	GET /redfish/v1/AccountService/Accounts/1	PASS
+获取用户2详细信息	GET /redfish/v1/AccountService/Accounts/2	PASS
+获取用户3详细信息	GET /redfish/v1/AccountService/Accounts/3	PASS
+获取用户4详细信息	GET /redfish/v1/AccountService/Accounts/4	PASS
+获取用户5详细信息	GET /redfish/v1/AccountService/Accounts/5	PASS
+获取用户6详细信息	GET /redfish/v1/AccountService/Accounts/6	PASS
+获取角色列表信息	GET /redfish/v1/AccountService/Roles	PASS
+获取Administrator角色	GET /redfish/v1/AccountService/Roles/Administrator	PASS
+获取Operator角色	GET /redfish/v1/AccountService/Roles/Operator	PASS
+获取User角色	GET /redfish/v1/AccountService/Roles/User	PASS
+获取CustomRole1_1角色	GET /redfish/v1/AccountService/Roles/CustomRole1_1	PASS
+获取CustomRole2角色	GET /redfish/v1/AccountService/Roles/CustomRole2	PASS
+获取CustomRole3角色	GET /redfish/v1/AccountService/Roles/CustomRole3	PASS
+获取CustomRole4_2角色	GET /redfish/v1/AccountService/Roles/CustomRole4_2	PASS
+获取None角色	GET /redfish/v1/AccountService/Roles/None	PASS
+IPMI - 用户管理			PASS
+获取所有用户信息	ipmitool user list	PASS
+获取用户摘要信息	ipmitool user summary	PASS
+```
+
+
+
+---
+
+## 3 测试建议
+
+### 3.1 测试环境
+
+#### 3.1.1 硬件环境
+
+| 组件 | 规格 | 说明 |
+|------|------|------|
+| MCP Server 主机 | 任意可运行 Python 3.12+ 的机器 | 运行 SWRDMCPServer |
+| PC 代理主机 | Windows 10/11（推荐） | 运行 local_proxy.py，需安装 Python 3.12+、Playwright、ipmitool、curl、PuTTY |
+| 目标 BMC 设备 | 支持 Redfish/IPMI 的服务器 | 测试用设备 IP: 192.168.88.222 |
+| 串口交换机 | 支持 Telnet 的串口服务器 | 测试用地址: 192.168.0.200:3004 |
+| FTP 服务器 | 任意 FTP 服务器 | 测试用地址: 10.141.228.15 |
+
+#### 3.1.2 软件依赖
+
+| 组件 | 依赖 | 安装方式 |
+|------|------|----------|
+| MCP Server | Python 3.12+, `mcp`, `requests`, `psutil`, `urllib3`, `pyyaml`, `cryptography` | `pip install -r requirements.txt` |
+| PC 代理 | Python 3.12+, `requests`, `playwright`, `cryptography` | `pip install requests playwright cryptography` |
+| PC 代理（额外） | curl, ipmitool, PuTTY (plink), tftpd32.exe | 手动安装并加入 PATH |
+| MCP Client | 支持 MCP 协议的 IDE（如 Cursor、VS Code + Continue 插件） | 配置 mcp.json |
+
+#### 3.1.3 网络拓扑
+
+```
+MCP Server ──(大网 10.41.x.x)──> PC 代理 ──(设备网 192.168.x.x)──> BMC 设备
+```
+
+- MCP Server 通过大网 IP（10.41.6.8）调用 PC 代理的 HTTPS 服务（端口 8888）
+- PC 代理通过设备网 IP（192.168.88.222）访问 BMC 设备的 Redfish/IPMI 接口
+
+### 3.2 功能测试
+
+#### 3.2.1 MCP Server 启动测试
+
+| 测试用例 | 预期结果 | 验证方法 |
+|----------|----------|----------|
+| 启动 MCP Server | 控制台输出 `Starting SWRDMCPServer on 0.0.0.0:8000` | 观察控制台输出 |
+| 启动 PC 代理 | 控制台输出 `Local Proxy 启动: https://0.0.0.0:8888` | 观察控制台输出 |
+| MCP Client 连接 | 连接成功，工具列表可见 | IDE 中查看 MCP 工具列表 |
+
+#### 3.2.2 核心工具功能测试
+
+| 测试用例 | 操作步骤 | 预期结果 |
+|----------|----------|----------|
+| sendRedfish GET | 调用 `sendRedfish(method="GET", URL="/redfish/v1")` | 返回 BMC 的 Redfish 根资源信息 |
+| sendRedfish POST | 调用 `sendRedfish(method="POST", ...)` | 根据安全策略，可能被拦截或要求确认 |
+| sendIPMI | 调用 `sendIPMI(command="power status")` | 返回设备电源状态 |
+| sendCommand ftp_download | 调用 `sendCommand(commandType="ftp_download", ...)` | 文件下载到 PC 代理本地路径 |
+| sendCommand serial | 调用 `sendCommand(commandType="serial", action="open")` | 串口连接建立成功 |
+| sendCommand ssh | 调用 `sendCommand(commandType="ssh", command="mc info")` | 返回远程命令执行结果 |
+| sendCommand tftp_server | 调用 `sendCommand(commandType="tftp_server", action="start")` | TFTP 服务器启动成功 |
+| sendCommand shell | 调用 `sendCommand(commandType="shell", command="dir /b")` | 返回目录列表 |
+| browserOpen/Run/Close | 依次调用 browserOpen → browserRun → browserClose | 浏览器打开、操作、关闭完整流程 |
+| authenticate | 调用 `authenticate(username="admin", password="admin123")` | 返回 Token |
+| logout | 调用 `logout(token="...")` | Token 被注销 |
+
+### 3.3 安全测试
+
+#### 3.3.1 高危命令拦截测试
+
+| 测试用例 | 操作步骤 | 预期结果 |
+|----------|----------|----------|
+| Shell 高危命令拦截 | `sendCommand(commandType="shell", params='{"command":"rm -rf /"}')` | 安全检查拦截，返回 SecurityCheckError |
+| Shell 高危命令拦截 | `sendCommand(commandType="shell", params='{"command":"shutdown -s -t 0"}')` | 安全检查拦截 |
+| Shell 安全命令放行 | `sendCommand(commandType="shell", params='{"command":"dir /b"}')` | 正常执行并返回结果 |
+| SSH 高危命令拦截 | `sendCommand(commandType="ssh", params='{"command":"reboot"}')` | 安全检查拦截 |
+| SSH 安全命令放行 | `sendCommand(commandType="ssh", params='{"command":"mc info"}')` | 正常执行 |
+
+#### 3.3.2 安全策略测试
+
+| 测试用例 | 操作步骤 | 预期结果 |
+|----------|----------|----------|
+| DELETE 操作拦截 | `sendRedfish(method="DELETE", ...)` | 被 block 策略拦截 |
+| POST 操作确认 | `sendRedfish(method="POST", ...)` | 触发 confirm 策略，返回 confirm_id |
+| 确认后放行 | 调用 `confirm_operation()` 后重试相同操作 | 操作正常执行 |
+| 确认过期 | 等待 300 秒后重试 | 再次触发 confirm 策略 |
+| 未认证访问 | 不传 token 参数调用工具 | 返回认证失败错误 |
+
+#### 3.3.3 告警通知测试
+
+| 测试用例 | 操作步骤 | 预期结果 |
+|----------|----------|----------|
+| 邮件告警 | 配置 email 渠道并触发 block 策略 | 收到告警邮件 |
+| 钉钉告警 | 配置 dingtalk 渠道并触发 block 策略 | 钉钉群收到告警消息 |
+| 企业微信告警 | 配置 wecom 渠道并触发 block 策略 | 企微群收到告警消息 |
+
+### 3.4 异常场景测试
+
+| 测试用例 | 操作步骤 | 预期结果 |
+|----------|----------|----------|
+| PC 代理未启动 | MCP Server 调用工具 | 返回连接失败错误 |
+| BMC 设备不可达 | 使用错误的 deviceIP | 返回超时或连接失败 |
+| 无效的 Token | 使用过期或伪造的 Token | 返回认证失败 |
+| 参数格式错误 | 传入非法的 IP 地址 | 参数校验失败，返回 ValidationError |
+| 请求体过大 | 传入超过 10MB 的 body | 安全检查拦截 |
+| 不支持的 commandType | `sendCommand(commandType="invalid")` | PC 代理返回 400 错误 |
+| 串口连接重复打开 | 对同一 sessionId 重复调用 serial open | 返回 session 已存在 |
+| TFTP 端口被占用 | 在端口 69 已被占用时启动 TFTP | 返回启动失败错误 |
+
+---
+
+
+## 4 用户认证方案
+
+### 4.1 认证架构总览
 
 SWRDMCPServer 采用**用户名/密码 + 临时 Token**的双重认证机制，在两个层级分别验证：
 
@@ -181,7 +611,7 @@ SWRDMCPServer 采用**用户名/密码 + 临时 Token**的双重认证机制，�
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 认证流程
+### 4.2 认证流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -213,16 +643,16 @@ SWRDMCPServer 采用**用户名/密码 + 临时 Token**的双重认证机制，�
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.3 Token 管理机制
+### 4.3 Token 管理机制
 
-#### 2.3.1 Token 类型
+#### 4.3.1 Token 类型
 
 | Token 类型 | 生成方式 | 存储位置 | 有效期 | 用途 |
 |-----------|---------|---------|--------|------|
 | 服务端 Token | 启动时生成或从配置读取 | `_server_token`（单例） | 永久 | MCP Client 连接认证（备用机制） |
 | 临时 Token | `authenticate` 工具认证后生成 | `_token_cache`（内存字典） | 3600 秒（可配置） | 业务工具调用认证 |
 
-#### 2.3.2 临时 Token 缓存结构
+#### 4.3.2 临时 Token 缓存结构
 
 ```
 _token_cache: dict[str, dict[str, Any]]
@@ -232,7 +662,7 @@ _token_cache: dict[str, dict[str, Any]]
    └─ "expires_at": float (过期时间戳, time.time() + AUTH_TOKEN_EXPIRE_SECONDS)
 ```
 
-#### 2.3.3 Token 验证逻辑
+#### 4.3.3 Token 验证逻辑
 
 ```
 _validate_tool_token(token) → (is_valid, message, username)
@@ -246,7 +676,7 @@ _validate_tool_token(token) → (is_valid, message, username)
 ⑤ 其他 → (False, "Token 无效", None)
 ```
 
-### 2.4 中间件认证方式
+### 4.4 中间件认证方式
 
 | 方式 | Authorization 头格式 | 说明 | 适用场景 |
 |------|---------------------|------|----------|
@@ -256,7 +686,7 @@ _validate_tool_token(token) → (is_valid, message, username)
 | token 前缀 | `token <Token>` | 兼容方式，与 Bearer 等效 | 兼容场景 |
 | 查询参数 | `?token=<token>` | 不支持自定义 Header 时的备用方式 | 兼容场景 |
 
-### 2.5 认证数据流
+### 4.5 认证数据流
 
 ```
 AI Agent                    SWRDMCPServer
@@ -304,7 +734,7 @@ AI Agent                    SWRDMCPServer
     │ <──────────────────────── │
 ```
 
-### 2.6 认证日志事件
+### 4.6 认证日志事件
 
 认证模块在关键节点记录日志，确保认证行为可追溯：
 
@@ -330,7 +760,7 @@ AI Agent                    SWRDMCPServer
 {"timestamp": 1713936000.0, "event": "tool_auth_failed", "tool": "sendRedfish", "reason": "Token 已过期，请重新调用 authenticate 工具获取 Token"}
 ```
 
-### 2.7 `/auth/token` HTTP 端点
+### 4.7 `/auth/token` HTTP 端点
 
 除 MCP 工具 `authenticate` 外，系统还提供独立的 HTTP 端点 `/auth/token`，用于获取临时 Token。该端点位于认证中间件之外，无需认证即可访问。
 
@@ -377,7 +807,7 @@ AI Agent                    SWRDMCPServer
 | 适用场景 | AI Agent 在 MCP 会话中获取 Token | 外部程序或脚本获取 Token |
 | 响应格式 | `{"status":"success", "token":"...", "token_type":"Bearer", "expires_in":3600}` | `{"token":"...", "token_type":"Bearer", "expires_in":3600}` |
 
-### 2.8 认证配置
+### 4.8 认证配置
 
 认证配置位于 `security_config.yaml` 的 `auth` 节，由 `config.py` 加载并导出为全局常量：
 
@@ -464,9 +894,9 @@ auth:
 
 ---
 
-## 3 数据流详解
+## 5 数据流详解
 
-### 3.1 请求处理主流程
+### 5.1 请求处理主流程
 
 ```
 MCP Client (IDE/AI Agent)
@@ -541,8 +971,12 @@ MCP Client (IDE/AI Agent)
 │ ⑦ 核心逻辑 (sendRedfish / sendIPMI)
 │    ├─ 打印 IDE 用户信息、MCP Client 信息
 │    ├─ 构造代理 URL:
-│    │     sendRedfish → http://{pcIP}:8888/redfish
-│    │     sendIPMI    → http://{pcIP}:8888/ipmi
+│    │     sendRedfish  → https://{pcIP}:8888/redfish
+│    │     sendIPMI     → https://{pcIP}:8888/ipmi
+│    │     sendCommand  → https://{pcIP}:8888/command
+│    │     browserOpen  → https://{pcIP}:8888/browser/open
+│    │     browserRun   → https://{pcIP}:8888/browser/run
+│    │     browserClose → https://{pcIP}:8888/browser/close
 │    ├─ 构造 JSON payload (含设备凭证)
 │    ├─ requests.post(proxy_url, json=payload, timeout=30)
 │    ├─ 成功 → 返回 response.text
@@ -560,7 +994,7 @@ MCP Client (IDE/AI Agent)
 MCP Client 收到响应
 ```
 
-### 3.2 Redfish 请求数据流
+### 5.2 Redfish 请求数据流
 
 ```
 AI Agent                    SWRDMCPServer                 PC 代理              目标设备
@@ -609,7 +1043,7 @@ AI Agent                    SWRDMCPServer                 PC 代理             
     │ <──────────────────────── │                           │                    │
 ```
 
-### 3.3 IPMI 请求数据流
+### 5.3 IPMI 请求数据流
 
 ```
 AI Agent                    SWRDMCPServer                 PC 代理              目标设备
@@ -656,7 +1090,7 @@ AI Agent                    SWRDMCPServer                 PC 代理             
     │ <──────────────────────── │                           │                    │
 ```
 
-### 3.4 安全拦截数据流
+### 5.4 安全拦截数据流
 
 ```
 AI Agent                    SWRDMCPServer                 预警渠道
@@ -680,7 +1114,7 @@ AI Agent                    SWRDMCPServer                 预警渠道
     │ <──────────────────────── │                           │
 ```
 
-### 3.5 确认机制数据流
+### 5.5 确认机制数据流
 
 ```
 AI Agent                    SWRDMCPServer
@@ -723,9 +1157,9 @@ AI Agent                    SWRDMCPServer
 
 ---
 
-## 4 安全审计方案
+## 6 安全审计方案
 
-### 4.1 安全审计总体架构
+### 6.1 安全审计总体架构
 
 SWRDMCPServer 的安全审计体系由三个维度构成：**操作日志审计**、**高危操作拦截**、**安全预警通知**。三者通过装饰器模式有机集成，形成完整的"预防 → 记录 → 预警"安全闭环。
 
@@ -770,9 +1204,9 @@ SWRDMCPServer 的安全审计体系由三个维度构成：**操作日志审计*
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 操作日志
+### 6.2 操作日志
 
-#### 4.2.1 实现原理
+#### 6.2.1 实现原理
 
 操作日志通过 `@with_operation_log` 装饰器实现，采用 Python 标准库 `logging` 模块，基于 `RotatingFileHandler` 实现日志轮转。
 
@@ -851,7 +1285,7 @@ SWRDMCPServer 的安全审计体系由三个维度构成：**操作日志审计*
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.2.2 日志记录内容详述
+#### 6.2.2 日志记录内容详述
 
 ##### (1) request_start 事件
 
@@ -943,7 +1377,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 2026-04-22 10:30:15 | CRITICAL | mcp_operation | security_alert | risk_level=严重 | operation=sendRedfish:DELETE:10.0.0.1:/redfish/v1/AccountService/Accounts/1 | reason=Redfish DELETE 操作可能导致数据丢失 | user=admin | request_id=c5f3e3d2-3456-7890-bcde-f01234567890 | timestamp=2026-04-22T02:30:15.123456Z
 ```
 
-#### 4.2.3 日志轮转策略
+#### 6.2.3 日志轮转策略
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -973,7 +1407,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.2.4 敏感信息脱敏规则
+#### 6.2.4 敏感信息脱敏规则
 
 | 敏感关键词 | 匹配方式 | 脱敏处理 | 匹配示例 |
 |------------|----------|----------|----------|
@@ -996,9 +1430,9 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 
 ---
 
-### 4.3 高危操作的定义与阻拦
+### 6.3 高危操作的定义与阻拦
 
-#### 4.3.1 风险等级定义
+#### 6.3.1 风险等级定义
 
 系统定义了四个风险等级，每个等级对应不同的处理策略：
 
@@ -1027,7 +1461,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 | 高危 | HIGH | 高危 | Redfish POST / PATCH / PUT 操作 | Redfish {method} 操作可能修改设备配置 | confirm（需要确认后放行） |
 | 严重 | CRITICAL | 严重 | Redfish DELETE 操作 | Redfish {method} 操作可能导致数据丢失 | block（直接拦截，禁止执行） |
 
-#### 4.3.2 风险评估引擎
+#### 6.3.2 风险评估引擎
 
 风险评估引擎 `_assess_risk()` 通过 HTTP Method 与风险等级的映射关系，自动评估每次操作的风险等级：
 
@@ -1065,7 +1499,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.3.3 拦截策略详解
+#### 6.3.3 拦截策略详解
 
 系统定义了四种拦截策略，根据风险等级自动选择：
 
@@ -1126,7 +1560,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.3.4 确证缓存机制
+#### 6.3.4 确证缓存机制
 
 对于 `confirm` 策略（高危操作），系统实现了确认缓存机制，允许用户在确认后在一定时间内免确认地重复执行相同操作：
 
@@ -1175,14 +1609,16 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
-| tool_name | 函数名 | `sendRedfish` / `sendIPMI` |
-| method | 参数 method | HTTP 方法 |
+| tool_name | 函数名 | `sendRedfish` / `sendIPMI` / `sendCommand` |
+| method | 参数 method | HTTP 方法（Redfish）或 commandType（sendCommand） |
 | deviceIP | 参数 deviceIP | 目标设备 IP |
 | URL | 参数 URL | Redfish 路径 |
 
-**示例**：`sendRedfish:POST:10.0.0.1:/redfish/v1/AccountService/Accounts`
+**示例**：
+- `sendRedfish:POST:10.0.0.1:/redfish/v1/AccountService/Accounts`
+- `sendCommand:shell:unknown:unknown`
 
-#### 4.3.5 安全异常类型
+#### 6.3.5 安全异常类型
 
 | 异常类 | 触发策略 | 携带信息 | 处理方式 |
 |--------|----------|----------|----------|
@@ -1219,9 +1655,9 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 
 ---
 
-### 4.4 安全预警通知
+### 6.4 安全预警通知
 
-#### 4.4.1 预警触发条件
+#### 6.4.1 预警触发条件
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1245,7 +1681,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-#### 4.4.2 预警上下文信息
+#### 6.4.2 预警上下文信息
 
 每次员警携带以下上下文信息，用于模板渲染：
 
@@ -1258,7 +1694,7 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 | `{request_id}` | 请求唯一标识 | `c5f3e3d2-3456-7890-bcde-f01234567890` |
 | `{timestamp}` | UTC 时间戳 | `2026-04-22T02:30:15.123456Z` |
 
-#### 4.4.3 预警渠道
+#### 6.4.3 预警渠道
 
 | 渠道 | 实现函数 | 协议 | 配置项 | 状态 |
 |------|----------|------|--------|------|
@@ -1310,9 +1746,9 @@ requests.exceptions.ConnectionTimeout: HTTP请求超时
 
 ---
 
-## 5 附录：配置参考
+## 7 附录：配置参考
 
-### 5.1 config.yaml（日志配置）
+### 7.1 config.yaml（日志配置）
 
 ```yaml
 log_level: DEBUG
@@ -1328,7 +1764,7 @@ file_format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 file_date_format: "%Y-%m-%d:%H:%M:%S"
 ```
 
-### 5.2 security_config.yaml（安全策略与认证配置）
+### 7.2 security_config.yaml（安全策略与认证配置）
 
 ```yaml
 # 安全策略配置
@@ -1370,7 +1806,7 @@ auth:
   token_expire_seconds: 3600
 ```
 
-### 5.3 alert_config.yaml（预警配置）
+### 7.3 alert_config.yaml（预警配置）
 
 ```yaml
 enabled: true
@@ -1406,13 +1842,11 @@ channels:
 
 ---
 
-## 6 附录：已知风险与改进建议
+## 8 附录：已知风险与改进建议
 
 | 序号 | 风险项 | 级别 | 说明 | 改进建议 |
 |------|--------|------|------|----------|
 | 1 | IPMI 命令风险评估不足 | 高 | `_assess_risk()` 仅基于 `method` 参数评估风险，`sendIPMI` 无 `method` 参数，所有 IPMI 命令（包括 `power reset` 等）均被默认为中危，仅记录日志 | 增加 IPMI 命令风险评估规则，对 `power reset`, `mc reset`, `user set` 等高危命令定义专门的风险等级 |
-| 2 | 代理通信未加密 | 高 | 与 PC 代理的通信使用 HTTP（非 HTTPS），设备凭证在网络中明文传输 | 改用 HTTPS，或在代理层实现加密通信 |
-| 3 | ~~无认证机制~~ | ~~高~~ | ~~MCP Server 未实现任何认证，任何能连接到 SSE 端点的客户端均可执行操作~~ | ~~增加 API Key / Token 验证，或实现 IP 白名单~~ **已解决：已实现用户名/密码 + 临时 Token 双重认证机制（`@auth_required` 装饰器 + `AuthMiddleware` 中间件）|
 | 4 | 确认缓存未持久化 | 中 | 确认缓存 `_confirm_cache` 存储在内存中，服务重启后丢失 | 改用 Redis 或数据库持久化确认状态 |
 | 5 | IPMI 命令注入风险 | 高 | `command` 参数未做校验，理论上可能被用于执行任意命令 | 增加 IPMI 命令白名单校验，禁止非预期命令 |
 | 6 | 密码明文传输 | 高 | `DevicePwd` 虽然在日志中脱敏，但在代理请求中以明文 JSON 传输 | 实现端到端加密，或使用密钥管理服务 |
@@ -1420,3 +1854,6 @@ channels:
 | 8 | 装饰器执行顺序 | 低 | `@with_high_risk_check` 在 `@with_operation_log` 之外，安全拦截不会产生操作日志（仅产生安全日志和员警） | 考虑调整装饰器顺序，或在安全拦截时也记录操作日志 |
 | 9 | Token 缓存未持久化 | 中 | 临时 Token 缓存 `_token_cache` 存储在内存中，服务重启后所有 Token 失效，用户需重新认证 | 改用 Redis 或数据库持久化 Token 状态 |
 | 10 | 用户密码明文存储 | 中 | 用户密码在 `security_config.yaml` 中以明文存储，存在泄露风险 | 改用哈希存储（如 bcrypt），或集成外部认证服务（LDAP/AD） |
+| 11 | Shell 命令注入风险 | 高 | `sendCommand` 的 shell 类型直接执行用户传入的命令，可能被用于执行恶意命令 | 增加命令白名单校验，或限制 shell 命令的执行范围 |
+| 12 | SSH 密码明文传输 | 高 | SSH 密码在 `sendCommand` 的 params 中以明文 JSON 传输到 PC 代理 | 在 PC 代理端实现 SSH 密钥认证替代密码认证 |
+| 13 | 串口连接未释放 | 中 | `_exec_serial` 打开的串口连接存储在内存中，服务异常退出时可能未释放 | 增加连接超时自动回收机制，或使用上下文管理器确保释放 |
