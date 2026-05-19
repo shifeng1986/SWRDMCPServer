@@ -4,6 +4,7 @@ SWRDMCPServer - BMC设备管理MCP服务
 
 __version__ = "0.1.0"
 
+from doctest import debug
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.transport_security import TransportSecuritySettings
 import requests
@@ -80,7 +81,6 @@ async def sendRedfish(
                 username = getattr(request.state, "authenticated_user", "unknown")
     except Exception:
         pass
-    print(f"[用户信息] 认证用户: {username}")
 
     try:
         proxy_url = f"https://{pcIP}:8888/redfish"
@@ -138,7 +138,6 @@ async def sendIPMI(
                 username = getattr(request.state, "authenticated_user", "unknown")
     except Exception:
         pass
-    print(f"[用户信息] 认证用户: {username}")
 
     try:
         proxy_url = f"https://{pcIP}:8888/ipmi"
@@ -168,6 +167,7 @@ async def sendIPMI(
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserOpen(
+    ctx: Context,
     pcIP: str,
     sessionId: str,
     headless: bool,
@@ -175,10 +175,10 @@ async def browserOpen(
     """在PC代理上打开浏览器
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         headless: 是否无头模式
-        ctx: MCP上下文
     """
     try:
         proxy_url = f"https://{pcIP}:8888/browser/open"
@@ -199,6 +199,7 @@ async def browserOpen(
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserRun(
+    ctx: Context,
     pcIP: str,
     sessionId: str,
     actions: str,
@@ -228,6 +229,7 @@ async def browserRun(
     '[{"type":"goto","url":"http://192.168.49.71"},{"type":"get_page_info"}]'
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         actions: 操作JSON数组
@@ -253,6 +255,7 @@ async def browserRun(
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserScreenshot(
+    ctx: Context,
     pcIP: str,
     sessionId: str,
     fullPage: bool,
@@ -260,10 +263,10 @@ async def browserScreenshot(
     """截取浏览器当前页面的截图（注意：可能超时，建议使用get_page_info等替代）
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
         fullPage: 是否全页截图
-        ctx: MCP上下文
     """
     try:
         proxy_url = f"https://{pcIP}:8888/browser/screenshot"
@@ -283,6 +286,7 @@ async def browserScreenshot(
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendCommand(
+    ctx: Context,
     pcIP: str,
     commandType: str,
     params: str,
@@ -297,6 +301,7 @@ async def sendCommand(
     - shell: 在PC代理上执行shell命令
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         commandType: 命令类型（ftp_download/serial/ssh/tftp_server/shell）
         params: JSON字符串，包含该命令类型所需的参数
@@ -344,12 +349,14 @@ async def sendCommand(
 @with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserClose(
+    ctx: Context,
     pcIP: str,
     sessionId: str,
 ) -> str:
     """关闭浏览器会话
 
     Args:
+        ctx: MCP上下文
         pcIP: PC代理的IP地址
         sessionId: 浏览器会话ID
     """
