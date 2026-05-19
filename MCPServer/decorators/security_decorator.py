@@ -10,6 +10,7 @@
 """
 
 import functools
+import inspect
 import json
 import logging
 import uuid
@@ -139,8 +140,8 @@ def _assess_command_risk(params: dict) -> tuple[str, str]:
     # 根据命令类型评估风险
     type_risk_map = {
         "ftp_download": ("低危", "FTP 文件下载操作"),
-        "serial": ("中危", "串口连接操作可能影响设备通信"),
-        "ssh": ("高危", "SSH 远程连接可执行任意命令"),
+        "serial": ("低危", "串口连接操作可能影响设备通信"),
+        "ssh": ("低危", "SSH 远程连接可执行任意命令"),
         "tftp_server": ("低危", "TFTP 文件传输服务操作"),
         "shell": ("高危", "Shell 命令执行操作"),
     }
@@ -238,8 +239,9 @@ def with_high_risk_check(func: Callable) -> Callable:
             if ctx and hasattr(ctx, "client_id"):
                 user = ctx.client_id or "unknown"
 
-        # 提取参数
-        param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
+        # 提取参数：使用 inspect.unwrap 穿透装饰器链获取原始函数签名
+        original_func = inspect.unwrap(func)
+        param_names = list(inspect.signature(original_func).parameters.keys())
         all_params = {}
         for i, name in enumerate(param_names):
             if name == "ctx":
