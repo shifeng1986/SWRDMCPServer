@@ -11,6 +11,7 @@
 """
 
 import functools
+import inspect
 import json
 import re
 from typing import Any, Callable
@@ -120,7 +121,9 @@ def validate_input(func: Callable) -> Callable:
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         tool_name = func.__name__
-        param_names = func.__code__.co_varnames[: func.__code__.co_argcount]
+        # 使用 inspect.unwrap 穿透装饰器链获取原始函数签名
+        original_func = inspect.unwrap(func)
+        param_names = list(inspect.signature(original_func).parameters.keys())
         all_params = {}
         for i, name in enumerate(param_names):
             if name == "ctx":
