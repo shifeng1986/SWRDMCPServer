@@ -25,8 +25,11 @@ from .operation_log_handler import setup_operation_logger, setup_debug_logger
 
 
 def _sanitize_parameters(params: dict) -> dict:
-    """返回原始参数，不做脱敏处理（完整记录用于审计）"""
-    return params
+    """对敏感参数进行脱敏处理"""
+    sanitized = params.copy()
+    if "DevicePwd" in sanitized:
+        sanitized["DevicePwd"] = "******"
+    return sanitized
 
 
 # 初始化日志记录器
