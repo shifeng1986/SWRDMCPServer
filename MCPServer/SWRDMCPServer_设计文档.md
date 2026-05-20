@@ -58,7 +58,7 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | 原则 | 说明 |
 |------|------|
 | **代理转发** | MCP Server 不直接与目标设备通信，而是通过 PC 代理中转，实现网络隔离与职责分离 |
-| **安全优先** | 四层装饰器防护（Token 认证 → 安全拦截 → 操作日志 → 输入校验），高危操作可被自动阻断 |
+| **安全优先** | 四层装饰器防护（Token 认证 → 操作日志 → 输入校验 → 安全拦截），高危操作可被自动阻断 |
 | **配置驱动** | 日志策略、安全策略、告警策略、认证策略均通过 YAML 配置文件管理，无需改代码即可调整 |
 | **可观测性** | 全生命周期操作日志 + 多渠道安全告警，确保所有操作可追溯 |
 | **认证管控** | 用户名/密码 + 临时 Token 双重认证，所有业务操作需通过 Token 验证 |
@@ -69,7 +69,7 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 
 | 工具名称 | 功能描述 | 风险等级 | 装饰器链 |
 |----------|----------|----------|----------|
-| `sendRedfish` | 通过 PC 代理转发 Redfish HTTP 请求到目标 BMC 设备 | 根据 HTTP Method 动态评估 | `@auth_required` → `@with_high_risk_check` → `@with_operation_log` → `@validate_input` |
+| `sendRedfish` | 通过 PC 代理转发 Redfish HTTP 请求到目标 BMC 设备 | 根据 HTTP Method 动态评估 | `@auth_required` → `@with_operation_log` → `@validate_input` → `@with_high_risk_check` |
 | `sendIPMI` | 通过 PC 代理执行 IPMI 命令（ipmitool） | 中危（默认） | 同上 |
 | `sendCommand` | 在 PC 代理上执行本地命令（FTP 下载/串口/SSH/TFTP/Shell） | 根据 commandType 动态评估 | 同上 |
 | `browserOpen` | 在 PC 代理上打开 Playwright 浏览器会话 | 低危 | 同上 |
@@ -93,8 +93,8 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | 子命令类型 | 功能描述 | 依赖工具 | 默认风险等级 | 超时时间 |
 |------------|----------|----------|-------------|----------|
 | `ftp_download` | 从 FTP 服务器下载文件到 PC 代理本地 | curl | 低危 | 300s |
-| `serial` | 通过串口交换机连接设备串口（plink telnet） | plink (PuTTY) | 中危 | - |
-| `ssh` | SSH 连接到设备并执行远程命令 | sshpass / plink | 高危 | 可配置（默认 30s） |
+| `serial` | 通过串口交换机连接设备串口（plink telnet） | plink (PuTTY) | 低危 | - |
+| `ssh` | SSH 连接到设备并执行远程命令 | sshpass / plink | 低危（含高危命令时升级为严重） | 可配置（默认 30s） |
 | `tftp_server` | 启动/停止 TFTP 文件传输服务器 | tftpd32.exe | 低危 | - |
 | `shell` | 在 PC 代理本地执行 Shell 命令 | cmd.exe | 高危~严重 | 可配置（默认 30s） |
 
@@ -106,7 +106,7 @@ SWRDMCPServer 是一个基于 MCP（Model Context Protocol）协议的智能服�
 | Token 有效期 | 可配置（默认 3600 秒） |
 | 风险等级 | 4 级：低危 / 中危 / 高危 / 严重 |
 | 处理策略 | 4 种：allow / log / confirm / block |
-| 高危命令检测 | 16 个关键词（del, rm, shutdown, reboot 等） |
+| 高危命令检测 | 22 个关键词（del, rm, shutdown, reboot, format, dd, kill 等） |
 | 告警渠道 | 邮件 / 钉钉 / 企业微信 / 自定义 Webhook |
 | 操作日志 | 全生命周期记录 + 敏感信息脱敏 + 日志轮转 |
 | 参数校验 | 自动推断校验规则（IP 格式、HTTP 方法、URL 路径等） |
@@ -916,10 +916,31 @@ MCP Client (IDE/AI Agent)
 │    │     ├─ Token 无效 → 返回 {"error": "Token 无效"}             │
 │    │     └─ Token 有效 → 自动注入 userName                        │
 │    │     ▼
-│ ④ @with_high_risk_check (第二层装饰器)                             │
+│ ④ @with_operation_log (第二层装饰器)
+│    ├─ 生成 request_id (UUID)
+│    ├─ 提取用户标识
+│    ├─ 提取参数 → _sanitize_parameters() 脱敏
+│    │     ┌──────────────────────────────────────────────┐           │
+│     │     │ 敏感关键词: DevicePwd, password, ftpPassword │           │
+│     │     │ 匹配时 → 值替换为 "******"                   │           │
+│     │     └──────────────────────────────────────────────┘           │
+│    ├─ 记录 request_start (INFO)
+│    ├─ 记录开始时间
+│    │     ▼
+│ ⑤ @validate_input (第三层装饰器)
+│    ├─ 遍历所有参数，自动推断校验规则
+│    │     ┌──────────────────────────────────────────────┐           │
+│     │     │ 参数名含 "ip"       → IPv4 格式校验        │           │
+│     │     │ 参数名 == "method"  → 有效 HTTP 方法校验   │           │
+│     │     │ 参数名含 "url"      → URL 路径格式校验     │           │
+│     │     │ 参数名含 "user"     → 非空校验              │           │
+│     │     │ 参数名含 "pwd/password" → 非空校验         │           │
+│     │     │ 参数名 == "body"    → 不校验                │           │
+│     │     └──────────────────────────────────────────────┘           │
+│    ├─ 校验失败 → raise ValidationError
+│    │     ▼
+│ ⑥ @with_high_risk_check (第四层装饰器)                             │
 │    ├─ SECURITY_ENABLED == False? → 直接放行                         │
-│    ├─ 提取用户标识 (userName → ctx.client_id → "unknown")          │
-│    ├─ 提取参数 → _assess_risk() 评估风险等级                        │
 │    ├─ 提取用户标识 (userName → ctx.client_id → "unknown")          │
 │    ├─ 提取参数 → _assess_risk() 评估风险等级                        │
 │    │     ┌──────────────────────────────────────────────┐           │
@@ -927,7 +948,9 @@ MCP Client (IDE/AI Agent)
 │     │     │ GET→低危  POST/PATCH/PUT→高危  DELETE→严重  │           │
 │     │     │ 无 method (IPMI) → 中危 (默认)             │           │
 │     │     └──────────────────────────────────────────────┘           │
-│    ├─ 构造 operation_key = "{tool}:{method}:{deviceIP}:{URL}"       │
+│    ├─ 构造 operation_key
+│    │     ├─ sendCommand: "{tool}:{commandType}:{命令内容}"
+│    │     └─ 其他: "{tool}:{method}:{deviceIP}:{URL}"
 │    ├─ 查询策略 (SECURITY_ACTIONS)                                   │
 │    │     ┌──────────────────────────────────────────────┐           │
 │     │     │ 严重→block   高危→confirm   中危→log        │           │
@@ -940,31 +963,6 @@ MCP Client (IDE/AI Agent)
 │    │     │     └─ 已确认 → 继续
 │    │     ├─ log?     → 记录 WARNING/INFO 日志 → 继续
 │    │     └─ allow?   → 继续
-│    │     ▼
-│ ⑤ @with_operation_log (中间层装饰器)
-│    ├─ 生成 request_id (UUID)
-│    ├─ 提取用户标识
-│    ├─ 提取参数 → _sanitize_parameters() 脱敏
-│    │     ┌──────────────────────────────────────────────┐           │
-│     │     │ 敏感关键词: password, pwd, secret, token,   │           │
-│     │     │ apikey, api_key, auth, credential,          │           │
-│     │     │ private_key, access_key                      │           │
-│     │     │ 匹配时 → 值替换为 "******"                   │           │
-│     │     └──────────────────────────────────────────────┘           │
-│    ├─ 记录 request_start (INFO)
-│    ├─ 记录开始时间
-│    │     ▼
-│ ⑥ @validate_input (最内层装饰器)
-│    ├─ 遍历所有参数，自动推断校验规则
-│    │     ┌──────────────────────────────────────────────┐           │
-│     │     │ 参数名含 "ip"       → IPv4 格式校验        │           │
-│     │     │ 参数名 == "method"  → 有效 HTTP 方法校验   │           │
-│     │     │ 参数名含 "url"      → URL 路径格式校验     │           │
-│     │     │ 参数名含 "user"     → 非空校验              │           │
-│     │     │ 参数名含 "pwd/password" → 非空校验         │           │
-│     │     │ 参数名 == "body"    → 不校验                │           │
-│     │     └──────────────────────────────────────────────┘           │
-│    ├─ 校验失败 → raise ValidationError
 │    │     ▼
 │ ⑦ 核心逻辑 (sendRedfish / sendIPMI)
 │    ├─ 打印 IDE 用户信息、MCP Client 信息
@@ -982,11 +980,14 @@ MCP Client (IDE/AI Agent)
 │     │
 │     ▼
 ⑧ 返回路径 (装饰器逐层返回)
+    ├─ @with_high_risk_check: 直接返回结果
+    ├─ @validate_input: 直接返回结果
     ├─ @with_operation_log:
     │     ├─ 成功 → request_end (INFO, status=success)
-    │     └─ 异常 → request_error (ERROR) + request_end (WARNING, status=failed)
+    │     ├─ 安全拦截异常 → request_end (WARNING, status=failed)
+    │     └─ 其他异常 → request_error (ERROR) + request_end (WARNING, status=failed)
     │              + re-raise 异常
-    └─ @with_high_risk_check: 直接返回结果
+    └─ @auth_required: 直接返回结果
     │
     ▼
 MCP Client 收到响应
@@ -1007,10 +1008,10 @@ AI Agent                    SWRDMCPServer                 PC 代理             
     │  )                        │                           │                    │
     │ ────────────────────────> │                           │                    │
     │                           │                           │                    │
-    │                           │ ① Token 认证: @auth_required 验证 token 参数
-    │                           │ ② 安全检查: GET→低危→log
-    │                           │ ③ 日志记录: request_start
-    │                           │ ④ 参数校验: IP/URL/Method
+│                           │ ① Token 认证: @auth_required 验证 token 参数
+│                           │ ② 日志记录: request_start
+│                           │ ③ 参数校验: IP/URL/Method
+│                           │ ④ 安全检查: GET→低危→log
     │                           │                           │                    │
     │                           │ ⑤ 构造代理请求:           │                    │
     │                           │ POST http://192.168.1.100:8888/redfish         │
@@ -1055,10 +1056,10 @@ AI Agent                    SWRDMCPServer                 PC 代理             
     │  )                        │                           │                    │
     │ ────────────────────────> │                           │                    │
     │                           │                           │                    │
-    │                           │ ① Token 认证: @auth_required 验证 token 参数
-    │                           │ ② 安全检查: 无method→中危→log
-    │                           │ ③ 日志记录: request_start
-    │                           │ ④ 参数校验: IP校验
+│                           │ ① Token 认证: @auth_required 验证 token 参数
+│                           │ ② 日志记录: request_start
+│                           │ ③ 参数校验: IP校验
+│                           │ ④ 安全检查: 无method→中危→log
     │                           │                           │                    │
     │                           │ ⑤ 构造代理请求:           │                    │
     │                           │ POST http://192.168.1.100:8888/ipmi            │

@@ -121,8 +121,8 @@ def _assess_command_risk(params: dict) -> tuple[str, str]:
 
     根据 commandType 和命令内容动态评估风险：
     - ftp_download: 低危
-    - serial: 中危
-    - ssh: 高危
+    - serial: 低危
+    - ssh: 低危（含高危命令时升级为严重）
     - tftp_server: 低危
     - shell: 高危~严重（取决于命令内容）
     """
