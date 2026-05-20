@@ -31,11 +31,11 @@ MCP服务器 ──(大网)──> PC代理 ──(小网/设备网)──> BMC�
 - 测试设备密码：h3c@1234
 
 ## 串口
-- 测试设备串口交换机端口：192.168.0.200:3004
+- 测试设备串口交换机端口：192.168.20.199:3011
 
 ## 固件升级配置
 - FTP服务器地址：10.141.228.15
 - FTP用户名：ftp-CCSPLSmart1
-- FTP密码：XXXXX
-- 固件文件路径：/data-out/w33199/0428/HDM3_3.05.01_FTC_signed.bin
-- 完整固件URI：ftp://ftp-CCSPLSmart1:XXXXXX@10.141.228.15/data-out/w33199/0428/HDM3_3.05.01_FTC_signed.bin
+- FTP密码：{ftp-password}
+- 固件文件路径：/data-out/s10643/HDM3_2.17.70_FTC_signed.bin
+- 本地文件路径：D:\Downloads\{date-yyyymmdd}
