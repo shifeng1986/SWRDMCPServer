@@ -283,11 +283,22 @@ def with_high_risk_check(func: Callable) -> Callable:
         # 评估风险等级
         risk_level, reason = _assess_risk(tool_name, all_params)
 
-        # 提取操作唯一标识（用于确认缓存）
-        method = all_params.get("method", "unknown")
-        url = all_params.get("URL", "unknown")
-        device_ip = all_params.get("deviceIP", "unknown")
-        operation_key = f"{tool_name}:{method}:{device_ip}:{url}"
+        # 构建操作唯一标识（用于确认缓存和日志）
+        if tool_name.lower() == "sendcommand":
+            # sendCommand 使用 commandType 和命令内容构建有意义的标识
+            cmd_type = all_params.get("commandType", "unknown")
+            params_str = all_params.get("params", "{}")
+            try:
+                params_dict = json.loads(params_str) if isinstance(params_str, str) else params_str
+            except (json.JSONDecodeError, TypeError):
+                params_dict = {}
+            cmd_content = params_dict.get("command", "")
+            operation_key = f"{tool_name}:{cmd_type}:{cmd_content}"
+        else:
+            method = all_params.get("method", "unknown")
+            url = all_params.get("URL", "unknown")
+            device_ip = all_params.get("deviceIP", "unknown")
+            operation_key = f"{tool_name}:{method}:{device_ip}:{url}"
 
         # 根据配置的策略处理
         action = _get_action(risk_level)

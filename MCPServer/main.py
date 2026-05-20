@@ -46,8 +46,8 @@ mcp = FastMCP(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendRedfish(
     ctx: Context,
@@ -108,8 +108,8 @@ async def sendRedfish(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendIPMI(
     ctx: Context,
@@ -163,8 +163,8 @@ async def sendIPMI(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserOpen(
     ctx: Context,
@@ -195,8 +195,8 @@ async def browserOpen(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserRun(
     ctx: Context,
@@ -251,8 +251,8 @@ async def browserRun(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserScreenshot(
     ctx: Context,
@@ -282,8 +282,8 @@ async def browserScreenshot(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查（含高危命令拦截）
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def sendCommand(
     ctx: Context,
@@ -345,8 +345,8 @@ async def sendCommand(
 
 @mcp.tool()
 @auth_required              # 统一认证检查
+@with_operation_log        # 操作日志记录（外层，确保拦截也记录日志）
 @with_high_risk_check      # 高危操作检查
-@with_operation_log        # 操作日志记录
 @validate_input            # 输入参数校验
 async def browserClose(
     ctx: Context,

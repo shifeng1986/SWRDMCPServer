@@ -202,6 +202,14 @@ def with_operation_log(func: Callable) -> Callable:
                 )
                 raise
 
+            # 安全拦截异常（SecurityCheckError/ConfirmationRequired）由安全装饰器自行记录日志，此处不再重复记录
+            from decorators.security_decorator import SecurityCheckError, ConfirmationRequired
+            if isinstance(e, (SecurityCheckError, ConfirmationRequired)):
+                debug_logger.warning(
+                    f"[安全拦截] tool={tool_name}, user={user}, request_id={request_id}, error={str(e)}"
+                )
+                raise
+
             # 其他异常：记录完整异常堆栈、参数值、用户和上下文（操作日志）
             operation_logger.error(
                 json.dumps(
