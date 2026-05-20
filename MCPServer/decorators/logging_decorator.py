@@ -27,8 +27,25 @@ from .operation_log_handler import setup_operation_logger, setup_debug_logger
 def _sanitize_parameters(params: dict) -> dict:
     """对敏感参数进行脱敏处理"""
     sanitized = params.copy()
+
+    # 脱敏顶层 DevicePwd 参数（sendRedfish/sendIPMI）
     if "DevicePwd" in sanitized:
         sanitized["DevicePwd"] = "******"
+
+    # 脱敏 params JSON 字符串中的密码字段（sendCommand: ftp_download/ftpPassword, ssh/password）
+    if "params" in sanitized and isinstance(sanitized["params"], str):
+        try:
+            params_dict = json.loads(sanitized["params"])
+            modified = False
+            for key in ("password", "ftpPassword"):
+                if key in params_dict:
+                    params_dict[key] = "******"
+                    modified = True
+            if modified:
+                sanitized["params"] = json.dumps(params_dict, ensure_ascii=False)
+        except (json.JSONDecodeError, TypeError):
+            pass  # 非 JSON 格式，不做处理
+
     return sanitized
 
 
