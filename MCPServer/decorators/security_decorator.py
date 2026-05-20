@@ -13,6 +13,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -86,6 +87,19 @@ class ConfirmationRequired(Exception):
         )
 
 
+def _contains_high_risk_keyword(command: str, keyword: str) -> bool:
+    """
+    使用单词边界匹配检查命令是否包含高危关键词，避免子串误匹配。
+
+    对于包含空格的多词关键词（如 "rm -rf"），使用子串匹配；
+    对于单个词的关键词（如 "rm", "dd"），使用 \\b 单词边界正则匹配。
+    """
+    if " " in keyword:
+        return keyword in command
+    pattern = re.compile(r'\b' + re.escape(keyword) + r'\b')
+    return bool(pattern.search(command))
+
+
 def _assess_risk(func_name: str, params: dict) -> tuple[str, str]:
     """
     评估操作风险等级，根据配置的 risk_level_mapping 映射
@@ -151,7 +165,7 @@ def _assess_command_risk(params: dict) -> tuple[str, str]:
     # 对 shell 类型，检查是否包含高危命令关键词
     if command_type == "shell" and command:
         for high_risk_cmd in HIGH_RISK_COMMANDS:
-            if high_risk_cmd in command:
+            if _contains_high_risk_keyword(command, high_risk_cmd):
                 risk_level = RiskLevel.CRITICAL
                 reason = f"Shell 命令包含高危操作关键词 '{high_risk_cmd}'"
                 break
@@ -159,7 +173,7 @@ def _assess_command_risk(params: dict) -> tuple[str, str]:
     # 对 ssh 类型，检查远程命令是否包含高危关键词
     if command_type == "ssh" and command:
         for high_risk_cmd in HIGH_RISK_COMMANDS:
-            if high_risk_cmd in command:
+            if _contains_high_risk_keyword(command, high_risk_cmd):
                 risk_level = RiskLevel.CRITICAL
                 reason = f"SSH 远程命令包含高危操作关键词 '{high_risk_cmd}'"
                 break
