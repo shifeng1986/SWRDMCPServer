@@ -364,7 +364,7 @@ StreamableHTTP session manager started
 [32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:8000[0m (Press CTRL+C to quit)
 ```
 
-绿区PC上代理程序的运行，也是依赖python3.12，并安装playwright（python -m playwright install），然后在TestTool目录下执行python local_proxy.py即可，执行成功，有如下输出：
+绿区PC上代理程序的运行，也是依赖python3.12，并安装playwright（pip install playwright;python -m playwright install），然后在TestTool目录下执行python local_proxy.py即可，执行成功，有如下输出：
 
 ```
 PS D:\Workspace\SWRDMCPServer\TestTool> python local_proxy.py
