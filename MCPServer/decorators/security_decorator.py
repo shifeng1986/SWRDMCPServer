@@ -48,10 +48,18 @@ class RiskLevel:
 
 # 高危命令关键词（用于 sendCommand 安全检查）
 HIGH_RISK_COMMANDS = [
+    # 原有 cmd/Linux 命令
     "del", "rm", "shutdown", "reboot", "poweroff", "halt", "init",
     "format", "mkfs", "dd", "fdisk", "kill", "pkill", "taskkill",
     "mv /", "chmod 777 /", "rmdir", "rd /s", "rm -rf",
     "shutdown -s", "shutdown -r", "restart-computer", "stop-computer",
+    # PowerShell 高危命令
+    "remove-item", "ri ", "rm -recurse",
+    "restart-computer -force", "stop-computer -force",
+    "format-volume", "clear-disk", "remove-volume",
+    # wmic 高危命令
+    "wmic process call terminate", "wmic os where",
+    "wmic delete", "wmic format",
 ]
 
 
