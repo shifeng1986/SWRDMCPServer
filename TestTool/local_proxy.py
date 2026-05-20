@@ -467,6 +467,58 @@ def _exec_serial(params: dict) -> dict:
                 return {"ok": True, "message": f"串口连接已关闭: {session_id}"}
             return {"ok": True, "message": "串口连接不存在"}
 
+    if action == "send":
+        """向串口发送命令"""
+        command = params.get("command", "")
+        if not command:
+            return {"ok": False, "error": "缺少要发送的命令"}
+        with _SERIAL_LOCK:
+            proc = _SERIAL_CONNECTIONS.get(session_id)
+            if not proc:
+                return {"ok": False, "error": f"串口连接不存在: {session_id}"}
+        try:
+            proc.stdin.write(command + "\n")
+            proc.stdin.flush()
+            return {"ok": True, "message": f"命令已发送: {command}", "sessionId": session_id}
+        except Exception as e:
+            return {"ok": False, "error": f"串口发送失败: {e}"}
+
+    if action == "read":
+        """读取串口缓冲区数据"""
+        timeout = params.get("timeout", 2)
+        with _SERIAL_LOCK:
+            proc = _SERIAL_CONNECTIONS.get(session_id)
+            if not proc:
+                return {"ok": False, "error": f"串口连接不存在: {session_id}"}
+        try:
+            output = ""
+            end_time = time.time() + timeout
+            # Windows 上 select.select 不支持管道，使用线程读取
+            import queue
+            read_queue = queue.Queue()
+
+            def _reader(stream, q):
+                try:
+                    while time.time() < end_time:
+                        line = stream.readline()
+                        if line:
+                            q.put(line)
+                        else:
+                            break
+                except Exception:
+                    pass
+
+            reader_thread = threading.Thread(target=_reader, args=(proc.stdout, read_queue), daemon=True)
+            reader_thread.start()
+            reader_thread.join(timeout=timeout)
+
+            while not read_queue.empty():
+                output += read_queue.get_nowait()
+
+            return {"ok": True, "output": output, "sessionId": session_id}
+        except Exception as e:
+            return {"ok": False, "error": f"串口读取失败: {e}"}
+
     # action == "open"
     if not host or not port:
         return {"ok": False, "error": "缺少串口连接参数 host 或 port"}
