@@ -25,7 +25,7 @@ risk_level_mapping:
 #   allow   - 直接允许，不记录日志
 actions:
   critical: block
-  high: confirm
+  high: log
   medium: log
   low: allow
 
