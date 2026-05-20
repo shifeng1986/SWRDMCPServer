@@ -564,8 +564,8 @@ def _exec_ssh(params: dict) -> dict:
     command = params.get("command", "")
     timeout = params.get("timeout", 30)
 
-    if not all([host, user, command]):
-        return {"ok": False, "error": "缺少SSH参数 host、user 或 command"}
+    if not all([host, user]):
+        return {"ok": False, "error": "缺少SSH参数 host 或 user"}
 
     # 使用 sshpass + ssh 执行远程命令
     # 如果 sshpass 不可用，尝试使用 plink
@@ -598,13 +598,46 @@ def _exec_ssh(params: dict) -> dict:
 def _exec_ssh_via_plink(host: str, port: int, user: str, password: str, command: str, timeout: int) -> dict:
     """通过 plink 执行 SSH 命令（sshpass 不可用时的回退方案）"""
     try:
-        # 使用 echo 管道传递密码
-        cmd = [
-            "cmd.exe", "/c",
-            f"echo {password} | plink -ssh -P {port} -l {user} -pw {password} "
-            f"-batch -no-antispoof {host} {command}"
-        ]
+        # BMC SSH 连接成功后需要按回车才能进入会话，通过 echo 管道先发送回车
+        # 使用 plink 执行 SSH 命令，通过 -pw 参数传递密码
+        # 通过 cmd.exe /c 调用确保能找到 plink（Windows 环境）
+        if command:
+            # 有命令时：先回车进入会话，再发送命令，最后退出
+            cmd = [
+                "cmd.exe", "/c",
+                f"(echo. & echo {command} & echo exit) | plink -ssh -P {port} -l {user} -pw {password} "
+                f"-batch {host}"
+            ]
+        else:
+            # 无命令时：只回车进入会话，等待一段时间后自动退出
+            cmd = [
+                "cmd.exe", "/c",
+                f"(echo. & ping -n 3 127.0.0.1 >nul & echo exit) | plink -ssh -P {port} -l {user} -pw {password} "
+                f"-batch {host}"
+            ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+
+        # 检测主机密钥未缓存错误，自动接受并重试
+        if proc.returncode != 0 and "host key is not cached" in proc.stderr.lower():
+            # 先接受主机密钥
+            accept_cmd = [
+                "cmd.exe", "/c",
+                f"echo y | plink -ssh -P {port} -l {user} -pw {password} "
+                f"-batch {host} exit"
+            ]
+            subprocess.run(accept_cmd, capture_output=True, text=True, timeout=30, shell=True)
+
+            # 重试原始命令
+            retry_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+            return {
+                "ok": retry_proc.returncode == 0,
+                "returncode": retry_proc.returncode,
+                "stdout": retry_proc.stdout,
+                "stderr": retry_proc.stderr,
+                "method": "plink",
+                "hostkey_cached": True,
+            }
+
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
