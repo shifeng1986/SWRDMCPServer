@@ -80,7 +80,7 @@ parameter_validation:
     - "yield "                    # 生成器
 
     # ── Shell ──
-    - "#!/bin/"                   # Shebang
+    - "#!/bin/"                   # Shell 脚本头
 
 # ──────────────────────────────────────────────
 # 用户认证配置
