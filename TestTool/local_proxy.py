@@ -406,8 +406,10 @@ class LocalProxyHandler(http.server.BaseHTTPRequestHandler):
 # ──────────────────────────────────────────────
 
 # 串口连接管理
-_SERIAL_CONNECTIONS: dict[str, subprocess.Popen] = {}
+# 每个 session 存储: {"process": subprocess.Popen, "output_file": str|None, "reader_thread": Thread|None, "ts": float}
+_SERIAL_CONNECTIONS: dict[str, dict] = {}
 _SERIAL_LOCK = threading.Lock()
+_SERIAL_STOP_EVENT = threading.Event()  # 全局停止标记，用于通知读取线程退出
 
 
 def _exec_ftp_download(params: dict) -> dict:
@@ -447,25 +449,92 @@ def _exec_ftp_download(params: dict) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _serial_reader_worker(session_id: str, stream, output_file: str | None):
+    """后台线程：持续读取串口输出，可选写入文件"""
+    fh = None
+    try:
+        if output_file:
+            # 确保目录存在
+            out_dir = os.path.dirname(output_file)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            fh = open(output_file, "a", encoding="utf-8", buffering=1)  # 行缓冲
+
+        while not _SERIAL_STOP_EVENT.is_set():
+            try:
+                line = stream.readline()
+                if not line:
+                    break  # 流已关闭
+                if fh:
+                    fh.write(line)
+                    fh.flush()
+            except (ValueError, OSError):
+                break
+    except Exception:
+        pass
+    finally:
+        if fh:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        # 清理 session 中的线程引用
+        with _SERIAL_LOCK:
+            conn = _SERIAL_CONNECTIONS.get(session_id)
+            if conn and conn.get("reader_thread") is threading.current_thread():
+                conn["reader_thread"] = None
+
+
 def _exec_serial(params: dict) -> dict:
-    """连接设备串口（通过 plink 或串口工具）"""
+    """连接设备串口（通过 plink 或串口工具）
+
+    支持参数:
+        host: 串口交换机IP
+        port: 串口交换机端口
+        baud: 波特率（默认115200）
+        action: open/close/send/read
+        sessionId: 会话ID（可选，默认自动生成）
+        outputFile: 输出重定向文件路径（可选，仅在action=open时有效）
+        command: 要发送的命令（仅在action=send时有效）
+        timeout: 读取超时秒数（仅在action=read时有效，默认2）
+    """
     host = params.get("host", "")
     port = params.get("port", 3004)
     baud = params.get("baud", 115200)
     action = params.get("action", "open").lower()
     session_id = params.get("sessionId", f"serial_{host}_{port}")
+    output_file = params.get("outputFile", "").strip() or None
 
     if action == "close":
         with _SERIAL_LOCK:
-            proc = _SERIAL_CONNECTIONS.pop(session_id, None)
-            if proc:
+            conn = _SERIAL_CONNECTIONS.pop(session_id, None)
+            if not conn:
+                return {"ok": True, "message": "串口连接不存在"}
+            proc = conn.get("process")
+            reader_thread = conn.get("reader_thread")
+            out_file = conn.get("output_file")
+
+        # 先通知读取线程退出
+        if reader_thread and reader_thread.is_alive():
+            _SERIAL_STOP_EVENT.set()
+            reader_thread.join(timeout=3)
+            _SERIAL_STOP_EVENT.clear()
+
+        # 终止进程
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=5)
-                except Exception:
                     proc.kill()
-                return {"ok": True, "message": f"串口连接已关闭: {session_id}"}
-            return {"ok": True, "message": "串口连接不存在"}
+                except Exception:
+                    pass
+
+        msg = f"串口连接已关闭: {session_id}"
+        if out_file:
+            msg += f"，输出已保存至: {out_file}"
+        return {"ok": True, "message": msg, "sessionId": session_id}
 
     if action == "send":
         """向串口发送命令"""
@@ -473,9 +542,10 @@ def _exec_serial(params: dict) -> dict:
         if not command:
             return {"ok": False, "error": "缺少要发送的命令"}
         with _SERIAL_LOCK:
-            proc = _SERIAL_CONNECTIONS.get(session_id)
-            if not proc:
+            conn = _SERIAL_CONNECTIONS.get(session_id)
+            if not conn:
                 return {"ok": False, "error": f"串口连接不存在: {session_id}"}
+            proc = conn.get("process")
         try:
             proc.stdin.write(command + "\n")
             proc.stdin.flush()
@@ -487,13 +557,19 @@ def _exec_serial(params: dict) -> dict:
         """读取串口缓冲区数据"""
         timeout = params.get("timeout", 2)
         with _SERIAL_LOCK:
-            proc = _SERIAL_CONNECTIONS.get(session_id)
-            if not proc:
+            conn = _SERIAL_CONNECTIONS.get(session_id)
+            if not conn:
                 return {"ok": False, "error": f"串口连接不存在: {session_id}"}
+            proc = conn.get("process")
+            out_file = conn.get("output_file")
+
+        # 如果启用了文件重定向，提示用户查看文件
+        if out_file:
+            return {"ok": True, "message": f"输出已重定向到文件，请查看: {out_file}", "sessionId": session_id}
+
         try:
             output = ""
             end_time = time.time() + timeout
-            # Windows 上 select.select 不支持管道，使用线程读取
             import queue
             read_queue = queue.Queue()
 
@@ -535,20 +611,41 @@ def _exec_serial(params: dict) -> dict:
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # 将 stderr 合并到 stdout，方便统一记录
             text=True,
         )
+
+        # 启动后台读取线程（如果指定了输出文件，则写入文件；否则丢弃）
+        reader_thread = None
+        if output_file:
+            reader_thread = threading.Thread(
+                target=_serial_reader_worker,
+                args=(session_id, proc.stdout, output_file),
+                daemon=True,
+            )
+            reader_thread.start()
+
         with _SERIAL_LOCK:
             # 关闭已有连接
-            old_proc = _SERIAL_CONNECTIONS.get(session_id)
-            if old_proc:
-                try:
-                    old_proc.terminate()
-                except Exception:
-                    pass
-            _SERIAL_CONNECTIONS[session_id] = proc
+            old_conn = _SERIAL_CONNECTIONS.get(session_id)
+            if old_conn:
+                old_proc = old_conn.get("process")
+                if old_proc:
+                    try:
+                        old_proc.terminate()
+                    except Exception:
+                        pass
+            _SERIAL_CONNECTIONS[session_id] = {
+                "process": proc,
+                "output_file": output_file,
+                "reader_thread": reader_thread,
+                "ts": time.time(),
+            }
 
-        return {"ok": True, "message": f"串口连接已建立: {host}:{port}", "sessionId": session_id}
+        msg = f"串口连接已建立: {host}:{port}"
+        if output_file:
+            msg += f"，输出将重定向到: {output_file}"
+        return {"ok": True, "message": msg, "sessionId": session_id}
     except FileNotFoundError:
         return {"ok": False, "error": "plink 未安装，请安装 PuTTY"}
     except Exception as e:
