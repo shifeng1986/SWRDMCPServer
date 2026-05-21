@@ -18,10 +18,16 @@ import inspect
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 
-from .operation_log_handler import setup_operation_logger, setup_debug_logger
+from .operation_log_handler import setup_operation_logger, setup_debug_logger, format_timestamp
+
+
+def _local_isoformat() -> str:
+    """返回本地时间的 ISO 格式字符串，标注 +08:00 时区"""
+    now = datetime.now()
+    return now.isoformat() + "+08:00"
 
 
 def _sanitize_parameters(params: dict) -> dict:
@@ -77,7 +83,7 @@ def with_operation_log(func: Callable) -> Callable:
     async def wrapper(*args, **kwargs):
         request_id = str(uuid.uuid4())
         tool_name = func.__name__
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = _local_isoformat()
 
         # 提取用户标识：优先从中间件认证获取，其次从 Context 中获取
         user = "unknown"
@@ -165,7 +171,7 @@ def with_operation_log(func: Callable) -> Callable:
             f"[请求开始] tool={tool_name}, user={user}, request_id={request_id}, params={sanitized_params}"
         )
 
-        start_time = datetime.now(timezone.utc)
+        start_time = datetime.now()
         status = "success"
         result_summary = ""
 
@@ -214,7 +220,7 @@ def with_operation_log(func: Callable) -> Callable:
             operation_logger.error(
                 json.dumps(
                     {
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": _local_isoformat(),
                         "request_id": request_id,
                         "tool_name": tool_name,
                         "user": user,
@@ -235,12 +241,12 @@ def with_operation_log(func: Callable) -> Callable:
             )
             raise
         finally:
-            end_time = datetime.now(timezone.utc)
+            end_time = datetime.now()
             duration_ms = int((end_time - start_time).total_seconds() * 1000)
 
             # 记录请求完成（操作日志 - 用于审计）
             log_entry = {
-                "timestamp": end_time.isoformat(),
+                "timestamp": _local_isoformat(),
                 "request_id": request_id,
                 "tool_name": tool_name,
                 "user": user,

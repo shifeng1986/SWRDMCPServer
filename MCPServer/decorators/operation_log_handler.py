@@ -13,9 +13,11 @@ from logging.handlers import TimedRotatingFileHandler
 
 
 def format_timestamp() -> str:
-    """生成可读的时间戳字符串，格式：2026-05-15 15:23:06.316"""
+    """生成可读的时间戳字符串，格式：2026-05-15 15:23:06.316+08:00（本地时间，标注时区）"""
     now = datetime.now()
-    return now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}"
+    # 计算 UTC+8 时区偏移
+    tz_offset = "+08:00"
+    return now.strftime("%Y-%m-%d %H:%M:%S.") + f"{now.microsecond // 1000:03d}{tz_offset}"
 
 
 class WeeklyTimedRotatingFileHandler(TimedRotatingFileHandler):
