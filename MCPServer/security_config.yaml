@@ -59,10 +59,28 @@ parameter_validation:
     options: 1024
 
   # 敏感关键字黑名单（匹配任一即拦截）
+  # 用于检测参数中是否包含编程语言代码片段
   blocked_keywords:
-    - "#include"
-    - "/etc/passwd"
-    - "/etc/shadow"
+    # ── C/C++ ──
+    - "#include"                  # 头文件引用
+    - "int main("                 # 主函数入口
+    - "printf("                   # C 标准输出
+    - "malloc("                   # 手动内存分配
+    - "->"                        # 指针成员访问
+
+    # ── Java ──
+    - "public static void main"   # Java 主函数签名
+    - "System.out.println"        # Java 标准输出
+    - "import java."              # Java 包导入
+    - "@Override"                 # 注解
+
+    # ── Python ──
+    - "if __name__"               # 入口判断
+    - "lambda "                   # 匿名函数
+    - "yield "                    # 生成器
+
+    # ── Shell ──
+    - "#!/bin/"                   # Shebang
 
 # ──────────────────────────────────────────────
 # 用户认证配置
