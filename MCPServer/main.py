@@ -7,18 +7,40 @@ __version__ = "0.5.0"
 from doctest import debug
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.transport_security import TransportSecuritySettings
-import requests
+import httpx
 import json
 import socket
 import psutil
-import urllib3
 from decorators import with_high_risk_check, with_operation_log, validate_input, auth_required
 from decorators.security_decorator import SecurityCheckError, ConfirmationRequired
 from config import AUTH_ENABLED
 from connection_auth import ConnectionAuthMiddleware
 
-# 抑制自签名证书的 SSL 警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 全局异步 HTTP 客户端（复用连接池，支持高并发）
+_http_client: httpx.AsyncClient | None = None
+
+
+async def get_http_client() -> httpx.AsyncClient:
+    """获取全局异步 HTTP 客户端（懒加载）"""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            verify=False,
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100,
+            ),
+        )
+    return _http_client
+
+
+async def close_http_client():
+    """关闭全局异步 HTTP 客户端"""
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
 
 def get_local_ipv4s():
     ips = set()
@@ -92,15 +114,14 @@ async def sendRedfish(
             "url": URL,
             "body": body,
         }
-        response = requests.post(
+        client = await get_http_client()
+        response = await client.post(
             proxy_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=30,
-            verify=False,
         )
         return response.text
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         return json.dumps({"error": f"Request failed: {str(e)}"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"}, ensure_ascii=False)
@@ -147,15 +168,14 @@ async def sendIPMI(
             "devicePwd": DevicePwd,
             "command": command,
         }
-        response = requests.post(
+        client = await get_http_client()
+        response = await client.post(
             proxy_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=30,
-            verify=False,
         )
         return response.text
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         return json.dumps({"error": f"Request failed: {str(e)}"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"}, ensure_ascii=False)
@@ -187,7 +207,8 @@ async def browserOpen(
             "headless": headless,
             "browser": "chromium"
         }
-        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
+        client = await get_http_client()
+        response = await client.post(proxy_url, json=payload)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -243,7 +264,8 @@ async def browserRun(
         }
         if options:
             payload["options"] = json.loads(options)
-        response = requests.post(proxy_url, json=payload, timeout=120, verify=False)
+        client = await get_http_client()
+        response = await client.post(proxy_url, json=payload)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -274,7 +296,8 @@ async def browserScreenshot(
             "sessionId": sessionId,
             "fullPage": fullPage
         }
-        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
+        client = await get_http_client()
+        response = await client.post(proxy_url, json=payload)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -329,15 +352,14 @@ async def sendCommand(
             "commandType": commandType,
             "params": params,
         }
-        response = requests.post(
+        client = await get_http_client()
+        response = await client.post(
             proxy_url,
             json=payload,
             headers={"Content-Type": "application/json"},
-            timeout=120,
-            verify=False,
         )
         return response.text
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         return json.dumps({"error": f"Command request failed: {str(e)}"}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"error": f"Unexpected error: {str(e)}"}, ensure_ascii=False)
@@ -363,7 +385,8 @@ async def browserClose(
     try:
         proxy_url = f"https://{pcIP}:8888/browser/close"
         payload = {"sessionId": sessionId}
-        response = requests.post(proxy_url, json=payload, timeout=60, verify=False)
+        client = await get_http_client()
+        response = await client.post(proxy_url, json=payload)
         return response.text
     except Exception as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
@@ -408,4 +431,8 @@ if __name__ == "__main__":
     
     print(f"[版本] SWRDMCPServer v{__version__}")
     print("Starting SWRDMCPServer on 0.0.0.0:8000")
-    mcp.run(transport="streamable-http")
+    try:
+        mcp.run(transport="streamable-http")
+    finally:
+        import asyncio
+        asyncio.run(close_http_client())
