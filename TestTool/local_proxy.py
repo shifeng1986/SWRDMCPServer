@@ -13,7 +13,7 @@ Local Proxy 代理转发工具
 5. 将设备的响应原样返回给 MCP Server
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import http.server
 import json

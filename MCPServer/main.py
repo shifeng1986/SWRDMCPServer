@@ -2,7 +2,7 @@
 SWRDMCPServer - BMC设备管理MCP服务
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from doctest import debug
 from mcp.server.fastmcp import FastMCP, Context
