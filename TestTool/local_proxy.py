@@ -695,42 +695,46 @@ def _exec_ssh(params: dict) -> dict:
 def _exec_ssh_via_plink(host: str, port: int, user: str, password: str, command: str, timeout: int) -> dict:
     """通过 plink 执行 SSH 命令（sshpass 不可用时的回退方案）"""
     try:
-        # BMC SSH 连接成功后需要按回车才能进入会话，通过 echo 管道先发送回车
+        # BMC SSH 连接成功后需要按回车才能进入会话
         # 使用 plink 执行 SSH 命令，通过 -pw 参数传递密码
         # 通过 cmd.exe /c 调用确保能找到 plink（Windows 环境）
+        # 注意：不能用 echo 管道传递带空格的命令（cmd 会自动加引号），
+        # 因此改用 Popen + stdin 写入命令文本，避免引号问题。
+        plink_cmd = [
+            "plink", "-ssh", "-P", str(port), "-l", user, "-pw", password,
+            host
+        ]
         if command:
-            # 有命令时：先回车进入会话，再发送命令，最后退出
-            cmd = [
-                "cmd.exe", "/c",
-                f"(echo. & echo {command} & echo exit) | plink -ssh -P {port} -l {user} -pw {password} "
-                f"-batch {host}"
-            ]
+            # 有命令时：先发 y\n 自动接受密钥（如有提示），再回车进入会话，发送命令，最后退出
+            input_data = f"y\n\n{command}\nexit\n"
         else:
             # 无命令时：只回车进入会话，等待一段时间后自动退出
-            cmd = [
-                "cmd.exe", "/c",
-                f"(echo. & ping -n 3 127.0.0.1 >nul & echo exit) | plink -ssh -P {port} -l {user} -pw {password} "
-                f"-batch {host}"
-            ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+            input_data = "y\n\nping -n 3 127.0.0.1 >nul\nexit\n"
+        proc = subprocess.Popen(
+            plink_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
 
         # 检测主机密钥未缓存错误，自动接受并重试
-        if proc.returncode != 0 and "host key is not cached" in proc.stderr.lower():
-            # 先接受主机密钥
-            accept_cmd = [
-                "cmd.exe", "/c",
-                f"echo y | plink -ssh -P {port} -l {user} -pw {password} "
-                f"-batch {host} exit"
-            ]
-            subprocess.run(accept_cmd, capture_output=True, text=True, timeout=30, shell=True)
-
-            # 重试原始命令
-            retry_proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=True)
+        if proc.returncode != 0 and "host key is not cached" in stderr.lower():
+            # 重试原始命令（第一次的 y\n 可能没被正确处理）
+            retry_proc = subprocess.Popen(
+                plink_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            retry_stdout, retry_stderr = retry_proc.communicate(input=input_data, timeout=timeout)
             return {
                 "ok": retry_proc.returncode == 0,
                 "returncode": retry_proc.returncode,
-                "stdout": retry_proc.stdout,
-                "stderr": retry_proc.stderr,
+                "stdout": retry_stdout,
+                "stderr": retry_stderr,
                 "method": "plink",
                 "hostkey_cached": True,
             }
@@ -738,8 +742,8 @@ def _exec_ssh_via_plink(host: str, port: int, user: str, password: str, command:
         return {
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
+            "stdout": stdout,
+            "stderr": stderr,
             "method": "plink",
         }
     except FileNotFoundError:
